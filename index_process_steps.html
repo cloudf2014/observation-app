@@ -1,0 +1,2081 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<!-- No data leave the device: the page may not open any network connection (connect-src 'none', form-action 'none').
+     Only the app files themselves (same origin) are loaded; the service worker caches them for offline use. -->
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'none'; form-action 'none'; base-uri 'none'; object-src 'none'">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="Observation">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<meta name="theme-color" content="#ffffff">
+<meta name="format-detection" content="telephone=no">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+<link rel="icon" type="image/png" href="icons/icon-192.png">
+<title>Observation Tool – Process steps</title>
+<!--
+  Observation Tool v0.4 – PROCESS-STEP VERSION (copy of index_transfers_only.html, 15 Nov 2026)
+
+  Like the transfers-only version, but without the communication episode: transfers are grouped by
+  PROCESS STEP (Spicker et al., 2026: any step in which data is stored, exchanged or otherwise
+  processed). A process step fixes the step from the process list, the providing and the requesting
+  stakeholder, initiative (pull / push), trigger and case. A new process step starts when the step
+  from the list, the stakeholders involved or the trigger of the need for information change.
+  Per transfer, sender and receiver are pre-set by the direction buttons (providing -> requesting,
+  requesting -> providing) and can be changed freely if further stakeholders are involved
+  (labelled source / target in the form; exported as sender / receiver)
+  (direction = "Other parties").
+  Internally the code still uses the names "situation" (= process step occurrence) / "transmitter"
+  (= providing) / "receiver" (= requesting); the export uses process_step_id, providing_stakeholder and
+  requesting_stakeholder (<id>_process_steps.csv). Interruptions, value class, start / end and KPIs as
+  in the transfers-only version. Own localStorage keys obs_pst_*.
+  Digital observation form for recording information transfers in hospital ward processes.
+
+  Single self-contained file: no external libraries, no network access required.
+  Runs in any current browser (target: tablet, Safari/Chrome).
+
+  Screens
+    Menu       – list and search of all sessions, export of all data, import of a backup
+    Setup      – session data of a new or open session (coding manual 4.1)
+    Observe    – activity timeline, interruptions, transfer entry, transfer log
+    Settings   – configurable lists (JSON)
+
+  Data model (exported as CSV, see README "Data dictionary"):
+    session   – one record per observation session (coding manual 4.1)
+    timeline  – gap-free activity segments of the observed stakeholder (coding manual 4.2)
+    transfers – one record per observed information transfer (coding manual 4.3)
+
+  Derived fields (media disruption, central system, waiting time, KPIs) are NOT
+  computed here but in the Python analysis package (src/observation_tool), so that
+  there is a single, documented calculation.
+
+  Storage: all sessions are autosaved in the browser's localStorage after every change.
+  localStorage is per browser and device and can be cleared by the browser – export
+  regularly as backup.
+
+  iPad / offline (17 Nov 2026): web app manifest, service worker (sw.js, caches only the app files),
+  apple-touch-icon; install via Safari → Share → Add to Home Screen. Export as one ZIP file via the
+  share sheet (Save to Files / AirDrop) because iOS handles several downloads in a row badly; import
+  accepts the JSON backup or the ZIP. Time fields are text fields hh:mm:ss (the iOS time picker has no
+  seconds). Screen wake lock while an interruption is running, a transfer form is open or, optionally,
+  during the whole session. A Content-Security-Policy forbids any network connection from the page.
+-->
+<style>
+  :root { --fg:#111; --muted:#666; --line:#ccc; --bg:#fafafa; --sel:#111; --selfg:#fff; --warn:#b00020; }
+  * { box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
+  body { margin:0; font-family:-apple-system, "Segoe UI", Arial, sans-serif; color:var(--fg); background:var(--bg); font-size:16px; }
+  header { display:flex; align-items:center; gap:10px; padding:8px 12px; border-bottom:1px solid var(--line); background:#fff; position:sticky; top:0; z-index:5; flex-wrap:wrap; }
+  header h1 { font-size:17px; margin:0 8px 0 0; }
+  header .info { color:var(--muted); font-size:14px; }
+  header .spacer { flex:1; }
+  button { font:inherit; border:1px solid var(--fg); background:#fff; color:var(--fg); border-radius:8px; padding:10px 14px; cursor:pointer; touch-action:manipulation; }
+  button:active { transform:scale(.98); }
+  button:disabled { opacity:.35; cursor:default; }
+  button.primary { background:var(--fg); color:#fff; }
+  button.danger { border-color:var(--warn); color:var(--warn); }
+  button.big { font-size:20px; padding:18px; }
+  button.small { padding:6px 10px; font-size:14px; }
+  .screen { display:none; padding:12px; }
+  .screen.active { display:block; }
+  label.f { display:block; font-weight:600; margin:14px 0 6px; font-size:14px; }
+  input[type=text], input[type=search], select, textarea { font:inherit; width:100%; padding:10px; border:1px solid var(--line); border-radius:8px; background:#fff; }
+  input.other-input { margin-top:6px; border-color:#888; }
+  textarea { min-height:300px; font-family:ui-monospace, Menlo, monospace; font-size:13px; }
+  .chips { display:flex; flex-wrap:wrap; gap:6px; }
+  .chip { border:1px solid var(--line); background:#fff; border-radius:20px; padding:9px 14px; font-size:15px; }
+  .chip.sel { background:var(--sel); color:var(--selfg); border-color:var(--sel); }
+  .layout { display:grid; grid-template-columns: 1fr 1.2fr; gap:12px; }
+  @media (max-width: 900px) { .layout { grid-template-columns: 1fr; } }
+  .panel { background:#fff; border:1px solid var(--line); border-radius:10px; padding:10px; }
+  .panel h2 { font-size:14px; text-transform:uppercase; letter-spacing:.04em; color:var(--muted); margin:2px 0 10px; }
+  .acts { display:grid; grid-template-columns:1fr 1fr; gap:8px; }
+  .act { min-height:64px; font-size:15px; text-align:left; border-color:var(--line); }
+  .act.cur { background:var(--sel); color:var(--selfg); border-color:var(--sel); }
+  .cur-box { font-size:15px; margin-bottom:10px; }
+  .cur-box b { font-size:18px; }
+  #btnInterrupt.on, #tfInterrupt.on { background:var(--warn); color:#fff; border-color:var(--warn); }
+  .log { max-height:70vh; overflow:auto; }
+  .log-item { border-bottom:1px solid var(--line); padding:8px 4px; font-size:14px; cursor:pointer; }
+  .log-item:hover { background:#f2f2f2; }
+  .log-item .t { color:var(--muted); font-variant-numeric:tabular-nums; }
+  .tag { display:inline-block; border:1px solid var(--line); border-radius:4px; padding:0 5px; font-size:12px; margin-left:4px; }
+  .tag.warn { border-color:var(--warn); color:var(--warn); }
+  .tag.open { border-color:var(--fg); font-weight:600; }
+  .banner { border:1px solid var(--fg); border-radius:10px; padding:10px 12px; margin-bottom:12px; background:#fff; }
+  /* menu table */
+  table.list { width:100%; border-collapse:collapse; font-size:14px; }
+  table.list th { text-align:left; border-top:2px solid var(--fg); border-bottom:1px solid var(--fg); padding:6px; font-size:13px; }
+  table.list td { border-bottom:1px solid var(--line); padding:8px 6px; vertical-align:top; }
+  table.list tr:last-child td { border-bottom:2px solid var(--fg); }
+  .match { font-size:12px; color:var(--muted); margin-top:3px; }
+  mark { background:#ddd; color:inherit; }
+  /* modal */
+  .modal { display:none; position:fixed; inset:0; background:rgba(0,0,0,.35); z-index:20; overflow:auto; }
+  .modal.open { display:block; }
+  .modal .sheet { background:#fff; max-width:1000px; margin:20px auto; border-radius:12px; padding:14px 18px 0; }
+  .sheet-head { padding:6px 0 10px; border-bottom:1px solid var(--line); }
+  .sheet-head h3 { margin:0 0 4px; font-size:18px; }
+  .sheet-foot { display:flex; gap:10px; align-items:center; position:sticky; bottom:0; background:#fff; padding:12px 0 16px; margin-top:16px; border-top:1px solid var(--line); z-index:2; flex-wrap:wrap; }
+  .sheet-foot .spacer { flex:1; }
+  .grid2 { display:grid; grid-template-columns:1fr 1fr; gap:0 24px; }
+  @media (max-width: 700px) { .grid2 { grid-template-columns:1fr; } }
+  .section-title { margin:18px 0 0; font-size:13px; text-transform:uppercase; letter-spacing:.05em; color:var(--muted); border-top:1px solid var(--line); padding-top:10px; }
+  .hint { color:var(--muted); font-size:13px; }
+  .row { display:flex; gap:8px; flex-wrap:wrap; align-items:center; }
+  .spacer { flex:1; }
+  .toast { position:fixed; bottom:96px; left:50%; transform:translateX(-50%); background:#111; color:#fff; padding:10px 16px; border-radius:8px; display:none; z-index:40; }
+  .timebar { display:flex; gap:6px; align-items:center; flex-wrap:wrap; margin-top:8px; }
+  .timebar input[type=time] { font:inherit; padding:8px; border:1px solid var(--line); border-radius:8px; width:auto; }
+  .corr { color:var(--warn); font-size:13px; }
+  table.tl { width:100%; border-collapse:collapse; font-size:14px; }
+  table.tl th { text-align:left; border-top:2px solid var(--fg); border-bottom:1px solid var(--fg); padding:6px; }
+  table.tl td { border-bottom:1px solid var(--line); padding:6px; }
+  table.tl input[type=time], table.tl select { font:inherit; padding:6px; border:1px solid var(--line); border-radius:6px; width:auto; max-width:100%; }
+  .medcols { display:grid; grid-template-columns:repeat(var(--n,3),1fr); gap:10px; }
+  .medcol h4 { margin:0 0 6px; font-size:12px; text-transform:uppercase; letter-spacing:.05em; color:var(--muted); border-bottom:1px solid var(--line); padding-bottom:4px; }
+  .medcol .chips { flex-direction:column; align-items:stretch; }
+  .medcol .chip { text-align:left; }
+  .hidden { display:none !important; }
+  /* ---- iPad / touch (17 Nov 2026) ---- */
+  html { -webkit-text-size-adjust:100%; }
+  body { overscroll-behavior-y:none; padding-left:env(safe-area-inset-left); padding-right:env(safe-area-inset-right); }
+  header { padding-top:calc(8px + env(safe-area-inset-top)); }
+  button { min-height:44px; }
+  button.small, .chip { min-height:44px; }
+  button, .chip, .log-item, .log-sit, summary { -webkit-user-select:none; user-select:none; -webkit-touch-callout:none; }
+  summary { min-height:44px; display:flex; align-items:center; }
+  input[type=text], input[type=search], select, textarea, input.tfield { font-size:16px; }   /* >= 16 px: no zoom on focus in iOS */
+  textarea { font-size:14px; }
+  input.tfield { font:inherit; font-size:17px; width:7.2em; padding:8px; border:1px solid var(--line); border-radius:8px; background:#fff; font-variant-numeric:tabular-nums; }
+  input.tfield.bad { border-color:var(--warn); }
+  .modal .sheet { margin:max(20px, env(safe-area-inset-top)) auto 0; }
+  .sheet-foot { padding-bottom:calc(16px + env(safe-area-inset-bottom)); }
+  .tablewrap { overflow-x:auto; -webkit-overflow-scrolling:touch; }
+  header { flex-wrap:nowrap; }
+  header #hdrInfo { flex:1 1 auto; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  header .spacer { flex:0 0 0; }
+  header h1 { white-space:nowrap; }
+  @media (max-width: 900px) { header h1 span { display:none; } }
+  .statusbar { font-size:13px; }
+  .statusbar .tag { font-size:12px; }
+  @media (orientation: portrait) and (max-width: 900px) { .log { max-height:none; } }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>Observation Tool <span style="font-weight:400;color:#666;font-size:14px">· process steps</span></h1>
+  <span class="info" id="hdrInfo"></span>
+  <span class="spacer"></span>
+  <span class="info" id="clock"></span>
+  <button id="btnMenu">Menu</button>
+  <button id="btnSettings">Settings</button>
+</header>
+<div class="row statusbar" id="statusBar" style="padding:4px 12px;"></div>
+
+<!-- ============ SCREEN 0: MENU – all sessions, search, export ============ -->
+<section class="screen" id="scrHome">
+  <div class="panel" style="max-width:1100px;margin:0 auto;">
+    <div class="row" style="margin-bottom:10px;">
+      <h2 style="margin:0;">Observation sessions</h2>
+      <span class="spacer"></span>
+      <button class="primary" id="btnNewSession">+ New session</button>
+    </div>
+    <div id="updateBanner" class="banner hidden"><b>New version of the app available.</b>
+      <span class="hint">Update when no observation is running; the stored data are kept.</span>
+      <button class="small primary" id="btnUpdate" style="margin-left:10px;">Update now</button></div>
+    <div id="installBanner" class="banner hidden"></div>
+    <div id="openBanner" class="banner hidden"></div>
+    <input type="search" id="inSearch" placeholder="Search sessions, cases (e.g. V03), roles, media, notes …" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" enterkeyhint="search">
+    <p class="hint" id="searchInfo"></p>
+    <div class="tablewrap"><table class="list">
+      <thead><tr><th>Session</th><th>Date / shift</th><th>Ward / process</th><th>Stakeholder</th><th>Transfers</th><th>Cases</th><th>Status</th><th></th></tr></thead>
+      <tbody id="sessionRows"></tbody>
+    </table></div>
+    <div class="row" style="margin-top:16px;">
+      <button id="btnKpiAll">KPIs of listed sessions</button>
+      <button id="btnExportAll">Export all data</button>
+      <label class="hint" style="display:flex;align-items:center;gap:8px;">
+        <button id="btnImport" type="button">Import backup (.json or .zip)</button>
+        <input type="file" id="inImport" class="hidden">
+      </label>
+      <span class="spacer"></span>
+      <span class="hint" id="storageInfo"></span>
+    </div>
+  </div>
+</section>
+
+<!-- ============ SCREEN 1: SESSION SETUP (coding manual 4.1) ============ -->
+<section class="screen" id="scrSetup">
+  <div class="panel" style="max-width:760px;margin:0 auto;">
+    <h2 id="setupTitle">New observation session</h2>
+    <p class="hint">No names and no patient-identifying data. Consent forms are stored separately from these data.</p>
+    <label class="f">Ward</label><input type="text" id="inWard" placeholder="e.g. ward code" autocomplete="off" autocorrect="off" autocapitalize="characters" spellcheck="false" enterkeyhint="done">
+    <label class="f">Shift</label><div class="chips" data-field="shift" data-list="shifts"></div>
+    <label class="f">Process observed</label><div class="chips" data-field="process" data-list="processes"></div>
+    <label class="f">Observed stakeholder: role</label><div class="chips" data-field="stakeholder_role" data-list="staffRoles"></div>
+    <label class="f">Observed stakeholder: experience</label><div class="chips" data-field="stakeholder_experience" data-list="experience"></div>
+    <div class="row" style="margin-top:20px;">
+      <button id="btnSetupBack">&larr; Menu</button>
+      <button class="primary big" id="btnStart">Start observation</button>
+      <button id="btnResume" class="hidden big">Save &amp; continue session</button>
+    </div>
+  </div>
+</section>
+
+<!-- ============ SCREEN 2: OBSERVATION ============ -->
+<section class="screen" id="scrObserve">
+  <div id="roBanner" class="banner hidden">
+    <b>Finished session – review mode.</b> Recording is closed; transfers can still be completed or corrected (tap an entry).
+    <button class="small" id="btnReopen" style="margin-left:10px;">Reopen session</button>
+  </div>
+  <!-- Case bar (optional): pseudonym of the patient case, details can be completed later -->
+  <div class="panel" style="margin-bottom:12px;">
+    <div class="row">
+      <h2 style="margin:0;">Case (optional)</h2>
+      <div class="chips" id="caseChips"></div>
+      <button id="btnNewCase" class="small">+ New case</button>
+      <button id="btnCaseDetails" class="small hidden">Case details</button>
+      <span class="hint" id="caseInfo"></span>
+    </div>
+  </div>
+  <div class="layout">
+    <!-- Transfer entry -->
+    <div class="panel">
+      <h2>Process step</h2>
+      <div id="sitCard" class="banner hidden"></div>
+      <button class="primary big" id="btnNewSituation" style="width:100%;">+ New process step</button>
+      <p class="hint">A process step fixes the step, the providing and the requesting stakeholder, initiative and trigger; the case is taken from the bar above. Start a new process step when the step, the stakeholders or the trigger change.</p>
+      <h2 style="margin-top:16px;">Transfer in this process step</h2>
+      <div class="acts" id="typeButtons" style="grid-template-columns:1fr;"></div>
+      <p class="hint">Tap the direction at the moment information is conveyed – the time is captured.</p>
+      <button class="hidden" id="btnTransfer">+ Transfer</button>
+      <div class="acts hidden" id="actButtons"></div>
+      <h2 style="margin-top:16px;">Interruption</h2>
+      <div class="cur-box">Status: <b id="curAct">–</b> <span class="hint" id="curDur"></span></div>
+      <span class="hint">Interruption started / ended:</span>
+      <div class="chips" id="backdateChips" style="margin:4px 0 8px;"></div>
+      <button id="btnInterrupt" class="big" style="width:100%;">Interruption</button>
+      <p class="hint">Internally or externally initiated event that causes the observed stakeholder to suspend the current work before completion. Tap again when it ends. An interruption can also be started inside an open transfer.</p>
+      <button id="btnIntDetails" class="small hidden">Interruption details</button>
+      <button id="btnTimeline" class="small">Edit interruptions</button>
+      <div style="margin-top:20px;" class="row">
+        <button id="btnBack">&larr; Session data</button>
+        <button id="btnKpi">KPIs</button>
+        <button id="btnExport">Export</button>
+        <button class="danger" id="btnEnd">End session</button>
+      </div>
+      <div class="row" style="margin-top:10px;">
+        <button class="small" id="btnAwake" type="button">Keep screen awake: off</button>
+        <span class="hint" id="awakeInfo">The screen stays on automatically while an interruption is running or a transfer form is open.</span>
+      </div>
+      <p class="hint" id="lastExportInfo"></p>
+    </div>
+    <!-- Log -->
+    <div class="panel">
+      <h2>Process steps and transfers <span id="cnt"></span></h2>
+      <p class="hint">Tap an entry to edit or complete fields after the session.</p>
+      <div class="log" id="log"></div>
+    </div>
+  </div>
+</section>
+
+<!-- ============ SCREEN 3: SETTINGS (configurable lists) ============ -->
+<section class="screen" id="scrSettings">
+  <div class="panel" style="max-width:1000px;margin:0 auto;">
+    <h2>Settings – configurable lists</h2>
+    <p class="hint">Lists (roles, media, activities, process steps …) are defined after the baseline interview. Edit the JSON below and save. Changes apply to new entries. Options starting with "Other" show a text field for clarification.</p>
+    <textarea id="cfgText" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"></textarea>
+    <div class="row" style="margin-top:10px;">
+      <button class="primary" id="btnCfgSave">Save settings</button>
+      <button id="btnCfgReset">Restore defaults</button>
+      <button id="btnCfgBack">Back</button>
+      <span class="spacer"></span>
+      <button class="danger" id="btnWipe">Delete all local data</button>
+    </div>
+  </div>
+</section>
+
+<!-- ============ TRANSFER FORM (coding manual 4.3) ============ -->
+<div class="modal" id="mdlTransfer">
+  <div class="sheet">
+    <div class="sheet-head">
+      <h3 id="tfTitle">New transfer</h3>
+      <div class="hint" id="tfMeta"></div>
+      <div class="row" style="margin:6px 0;"><button id="tfInterrupt" class="small" type="button">Interruption during this transfer</button> <span class="hint" id="tfIntInfo"></span></div>
+      <div class="timebar">
+        <b>Start of transfer</b>
+        <input type="text" class="tfield" id="tfTime" inputmode="numeric" placeholder="hh:mm:ss" maxlength="8">
+        <button class="small" data-shift="-30">−30 s</button>
+        <button class="small" data-shift="-60">−1 min</button>
+        <button class="small" data-shift="-120">−2 min</button>
+        <button class="small" id="tfTimeReset">Reset</button>
+        <span class="corr" id="tfTimeCorr"></span>
+      </div>
+      <div class="timebar">
+        <b>End of transfer</b>
+        <input type="text" class="tfield" id="tfEnd" inputmode="numeric" placeholder="hh:mm:ss" maxlength="8">
+        <button class="small primary" id="tfDone" type="button">Transfer done</button>
+        <span class="hint" id="tfEndInfo"></span>
+      </div>
+    </div>
+
+    <div class="section-title">Live fields</div>
+    <div class="banner" id="tfSitInfo" style="margin:10px 0 0;"></div>
+    <label class="f">Direction</label><div class="chips" id="tfDir"></div>
+    <details id="tfParties" style="margin-top:6px;"><summary class="hint" style="cursor:pointer;">Further stakeholders involved? Change source / target</summary>
+    <div class="grid2"><div><label class="f">Source (pre-set by the direction)</label><div class="chips" data-tf="sender" data-list="participants"></div></div>
+      <div><label class="f">Target</label><div class="chips" data-tf="receiver" data-list="receivers"></div></div></div></details>
+    <label class="f">Value class (VA = value-added · RNVA = required, non-value-added · NVA = non-value-added)</label><div class="chips" data-tf="value_class" data-list="valueClasses"></div>
+    <label class="f">Transfer medium (pre-set from the previous transfer of the process step: tapping another medium replaces it, tapping the pre-set confirms it; further taps add media – one transfer is saved per medium)</label><div class="medcols" id="tfMedia"></div>
+    <div class="grid2">
+      <div>
+        <label class="f">Type of information (primary)</label><div class="chips" data-tf="info_type" data-list="infoTypes"></div>
+        <label class="f">Type of information (secondary, optional – if the transfer also carries the other type)</label><div class="chips" data-tf="info_type_secondary" data-list="infoTypes"></div>
+        <label class="f">Urgency (explicit cues only)</label><div class="chips" data-tf="urgency" data-list="urgency"></div>
+      </div>
+      <div>
+        <label class="f">Information state at source</label><div class="chips" data-tf="state_source" data-list="statesSource"></div>
+        <label class="f">Information state at target</label><div class="chips" data-tf="state_target" data-list="statesTarget"></div>
+        <label class="f">Query needed</label><div class="chips" data-tf="query_needed" data-list="yesno"></div>
+        <label class="f">Automated</label><div class="chips" data-tf="automated" data-list="yesno"></div>
+        <label class="f">Interrupting</label><div class="chips" data-tf="interrupting" data-list="yesno"></div>
+        <div id="wrapExists">
+          <label class="f">Information already exists? (target = system/document)</label><div class="chips" data-tf="already_exists" data-list="existsOptions"></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="section-title">Can be completed after the session</div>
+    <div class="grid2">
+      <div>
+        <label class="f">Transfer successful (pre-set: yes; change e.g. for an unanswered call)</label><div class="chips" data-tf="successful" data-list="yesno"></div>
+        <label class="f">Follow-up of transfer no. (links a failed attempt)</label><select id="tfFollow"></select>
+        <label class="f">Waiting reason (multiple choice)</label><div class="chips" data-tf="waiting_reason" data-list="waitingReasons" data-multi="1"></div>
+      </div>
+      <div>
+        <label class="f">Deviation from standard process</label><div class="chips" data-tf="deviation" data-list="yesno"></div>
+      </div>
+    </div>
+
+    <!-- action bar at the bottom of the form -->
+    <div class="sheet-foot">
+      <button id="tfDelete" class="danger hidden">Delete</button>
+      <span class="spacer"></span>
+      <button id="tfCancel">Cancel</button>
+      <button id="tfSaveParallel" class="hidden">Save + parallel transfer</button>
+      <button id="tfSaveNext">Save + next transfer</button>
+      <button class="primary" id="tfSave">Save</button>
+    </div>
+  </div>
+</div>
+
+<!-- ============ CASE DETAILS ============ -->
+<div class="modal" id="mdlCase">
+  <div class="sheet" style="max-width:640px;">
+    <div class="sheet-head">
+      <h3 id="caseTitle">Case</h3>
+      <div class="hint">Can be completed after the session. Only categories – no names, dates of birth or other identifying details.</div>
+    </div>
+    <label class="f">Diagnosis</label><input type="text" id="caseDiagnosis" placeholder="e.g. suspected GI bleeding">
+    <label class="f">Comorbidities</label><input type="text" id="caseComorb" placeholder="e.g. diabetes type 2, COPD">
+    <div class="sheet-foot">
+      <span class="spacer"></span>
+      <button id="caseCancel">Cancel</button>
+      <button class="primary" id="caseSave">Save</button>
+    </div>
+  </div>
+</div>
+
+<!-- ============ SITUATION FORM ============ -->
+<div class="modal" id="mdlSituation">
+  <div class="sheet">
+    <div class="sheet-head">
+      <h3 id="sitTitle">New process step</h3>
+      <div class="hint" id="sitMeta">Step, stakeholders, initiative and trigger apply to all transfers of the process step; direction, source/target and medium are recorded per transfer.</div>
+    </div>
+    <div class="grid2">
+      <div>
+        <label class="f">Process step</label><div class="chips" data-sit="process_step" data-list="stepsOfProcess"></div>
+        <label class="f">Providing stakeholder (provides the information)</label><div class="chips" data-sit="transmitter" data-list="participants"></div>
+        <label class="f">Requesting stakeholder (requires the information)</label><div class="chips" data-sit="receiver" data-list="receivers"></div>
+        <div class="section-title">Can be completed after the session</div>
+        <label class="f">Initiative</label><div class="chips" data-sit="initiative" data-list="initiatives"></div>
+        <p class="hint">Pull = the requesting stakeholder obtains the information (asks, calls, looks it up in the HIS) · Push = the providing stakeholder passes it on unasked.</p>
+        <label class="f">Trigger – what created the need for information?</label>
+        <div class="chips" data-sit="trigger" data-list="triggers"></div>
+      </div>
+      <div>
+        <p class="hint">Case: taken over from the current case on the main screen (optional).</p>
+      </div>
+    </div>
+    <div class="sheet-foot">
+      <button id="sitDelete" class="danger hidden">Delete process step</button>
+      <span class="spacer"></span>
+      <button id="sitCancel">Cancel</button>
+      <button class="primary" id="sitSave">Save process step</button>
+    </div>
+  </div>
+</div>
+
+<!-- ============ INTERRUPTION FORM ============ -->
+<div class="modal" id="mdlInterruption">
+  <div class="sheet">
+    <div class="sheet-head">
+      <h3>Interruption</h3>
+      <div class="hint" id="intMeta"></div>
+    </div>
+    <div class="grid2">
+      <div>
+        <label class="f">Origin</label><div class="chips" data-int="interruption_origin" data-list="interruptionOrigins"></div>
+        <p class="hint">Internal = interrupted by the work itself, e.g. a mistake noticed or a re-prioritization of tasks · External = triggered by an event outside the current workflow.</p>
+        <label class="f">Source (who or what interrupts)</label><div class="chips" data-int="interruption_source" data-list="interruptionSources"></div>
+        <label class="f">Medium</label><div class="chips" data-int="interruption_medium" data-list="interruptionMedia"></div>
+        <label class="f">Reason</label><div class="chips" data-int="interruption_reason" data-list="interruptionReasons"></div>
+      </div>
+      <div>
+        <label class="f">Type of information</label><div class="chips" data-int="interruption_info_type" data-list="interruptionInfoTypes"></div>
+        <label class="f">Urgency (explicit cues only)</label><div class="chips" data-int="interruption_urgency" data-list="urgency"></div>
+        <label class="f">Outcome for the interrupted work</label><div class="chips" data-int="interruption_outcome" data-list="interruptionOutcomes"></div>
+        <label class="f">Note (no names, no patient data)</label><input type="text" id="intNote">
+      </div>
+    </div>
+    <p class="hint">The interruption keeps running while this form is open; tap <b>End interruption</b> (main screen or transfer form) when it ends.
+      If information is conveyed, <b>Save + record as transfer</b> opens a pre-filled transfer (rule R16).</p>
+    <div class="sheet-foot">
+      <span class="spacer"></span>
+      <button id="intCancel">Cancel</button>
+      <button id="intSaveTransfer">Save + record as transfer</button>
+      <button class="primary" id="intSave">Save</button>
+    </div>
+  </div>
+</div>
+
+<!-- ============ KPI VIEW ============ -->
+<div class="modal" id="mdlKpi">
+  <div class="sheet">
+    <div class="sheet-head">
+      <h3 id="kpiTitle">KPIs</h3>
+      <div class="hint">Calculated as in the analysis package (Spicker et al., 2026): ratios over the number of successful transfers.
+        la = level of automation · ci = centrality index · rtci = real-time capability · mdi = media disruptions · fpyi = first pass yield.</div>
+      <div class="row" style="margin-top:8px;">
+        <label class="hint"><input type="checkbox" id="kpiPatients"> include transfers with patients/relatives (rule R9)</label>
+        <label class="hint">CI denominator <select id="kpiCiDen" style="width:auto;padding:4px;"><option value="all">all transfers</option><option value="person">transfers to persons</option></select></label>
+        <label class="hint">real-time threshold <input type="text" id="kpiRt" value="5" inputmode="decimal" enterkeyhint="done" style="width:60px;padding:4px;"> min</label>
+      </div>
+    </div>
+    <div id="kpiBody"></div>
+    <div class="sheet-foot">
+      <span class="hint">Values are a working view; the Python analysis remains the reference for the thesis.</span>
+      <span class="spacer"></span>
+      <button id="kpiCsv">Download KPI table (CSV)</button>
+      <button class="primary" id="kpiClose">Close</button>
+    </div>
+  </div>
+</div>
+
+<!-- ============ TIMELINE EDITOR ============ -->
+<div class="modal" id="mdlTimeline">
+  <div class="sheet">
+    <div class="sheet-head">
+      <h3>Edit interruptions</h3>
+      <div class="hint">Correct the start or end of an interruption, open its details or delete it. Changed interruptions are marked as time-corrected in the export.</div>
+    </div>
+    <div class="tablewrap"><table class="tl">
+      <thead><tr><th>#</th><th>Interruption</th><th>Start</th><th>End</th><th>Duration</th><th></th></tr></thead>
+      <tbody id="tlRows"></tbody>
+    </table></div>
+    <p class="hint">Times as hh:mm:ss; digits only also work (e.g. 081530 or 0815).</p>
+    <div class="sheet-foot">
+      <span class="hint" id="tlMsg"></span>
+      <span class="spacer"></span>
+      <button id="tlCancel">Cancel</button>
+      <button class="primary" id="tlSave">Save timeline</button>
+    </div>
+  </div>
+</div>
+
+<!-- In-app confirmation dialog (native confirm() is blocked in embedded previews) -->
+<div class="modal" id="mdlConfirm">
+  <div class="sheet" style="max-width:520px;margin-top:120px;padding-bottom:16px;">
+    <p id="cfMsg" style="font-size:17px;"></p>
+    <div class="row" style="justify-content:flex-end;">
+      <button id="cfNo">Cancel</button>
+      <button class="primary" id="cfYes">OK</button>
+    </div>
+  </div>
+</div>
+
+<!-- ============ EXPORT (17 Nov 2026) ============ -->
+<div class="modal" id="mdlExport">
+  <div class="sheet" style="max-width:680px;">
+    <div class="sheet-head">
+      <h3 id="exTitle">Export</h3>
+      <div class="hint" id="exMeta"></div>
+    </div>
+    <p class="hint">All tables (CSV) and the JSON backup are packed into <b>one ZIP file</b>. On the iPad tap <b>Share / save ZIP</b>
+      and choose <i>Save to Files</i> (e.g. a folder <i>On My iPad</i>) or AirDrop to your computer. The app itself sends nothing;
+      only use share targets allowed by the data protection concept.</p>
+    <div class="row">
+      <button class="primary big" id="exShare">Share / save ZIP</button>
+      <button class="big" id="exZip">Download ZIP</button>
+      <button id="exFiles">Download separate files</button>
+    </div>
+    <p class="hint" id="exList"></p>
+    <div class="sheet-foot">
+      <span class="hint" id="exMsg"></span>
+      <span class="spacer"></span>
+      <button class="primary" id="exClose">Close</button>
+    </div>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+'use strict';
+// Direction of a transfer within its process step (exported in transfers.csv).
+const FWD = 'Providing → requesting', BWD = 'Requesting → providing', OTHER_DIR = 'Other parties';
+// Value class of a transfer, chosen by the observer (basis of the value-added time in this version).
+const VALUE_CLASSES = ['VA', 'RNVA', 'NVA'];
+// Trigger values until 13 Nov 2026 → current list (see normalizeTriggers).
+const OLD_TRIGGERS = { 'Missing information': 'Missing or unclear information', 'Routine procedure': 'Planned process step',
+  'Unplanned event / change in patient condition': 'Change in patient condition' };
+/* =========================================================================
+   1. DEFAULT CONFIGURATION
+   Placeholder lists based on the coding manual v0.1. Final lists follow the
+   baseline interview (work package AP6) and are edited under "Settings".
+   Options starting with "Other" show a text field (stored as <field>_other).
+   ========================================================================= */
+const DEFAULT_CONFIG = {
+  version: '1.2',
+  // Initiative of a process step (pull-oriented view, Spicker et al. 2026) – single choice
+  initiatives: ['Pull', 'Push'],
+  // What created the need for information in a process step – single choice (13 Nov 2026)
+  triggers: ['Planned process step', 'Order / decision', 'Change in patient condition', 'Missing or unclear information',
+    'New information available', 'Organisational / logistic', 'Other trigger'],
+  // Types of transfer removed (12 Nov 2026): direction buttons with the real roles; read-back is not recorded.
+  observers: ['O1', 'O2'],
+  processes: ['Patient admission', 'Diagnosis', 'Treatment', 'Discharge', 'Other'],
+  // US shift names (8-hour model); for a 12-hour model use ['Day shift', 'Night shift'].
+  shifts: ['Day shift', 'Evening shift', 'Night shift'],
+  experience: ['In training', 'Qualified, < 5 years', '5–10 years', '> 10 years'],
+  // Staff roles (persons). Patient/relative is a separate role (rule R9).
+  // Flex team and agency staff are part of the role list (familiarity with the ward, S1).
+  staffRoles: ['Nurse', 'ICU nurse', 'ER nurse', 'OR nurse', 'Endoscopy nurse', 'Flex team', 'Agency staff (temporary)', 'Physician',
+    'Admission staff', 'Ward secretary', 'Transport service', 'Laboratory staff', 'Other staff'],
+  patientRole: 'Patient/relative',
+  // IT systems are stakeholders in their own right (rules R3, R4).
+  systems: ['HIS', 'LIS', 'PACS', 'PDMS'],
+  // Central IT systems for the centrality index (to be confirmed).
+  centralSystems: ['HIS'],
+  // Value classification of the activity buttons for value-added time (VA, RNVA, NVA, OUT).
+  activityClasses: {
+    'Create / document information': 'VA', 'Pass on information': 'VA', 'Retrieve information': 'RNVA',
+    'Convert information': 'NVA', 'Search for information': 'NVA', 'Clarify / query': 'NVA',
+    'Wait for information': 'NVA', 'Non-information activity': 'OUT'
+  },
+  // Receiver for whiteboards/notices (rule R8).
+  groupReceiver: 'Group/open',
+  // Transfer media, pre-classified by category (situation version: shown as columns digital / physical / oral,
+  // each with an "Other … medium" option and text field). Add a column by using a new category name.
+  // 15 Nov 2026: digital instead of electronic, as in Spicker et al. (2026); physical kept (wider than paper-based)
+  mediaCategories: ['digital', 'physical', 'oral'],
+  media: [
+    { name: 'Telephone', category: 'digital' },
+    { name: 'Pager', category: 'digital' },
+    { name: 'Messenger', category: 'digital' },
+    { name: 'E-mail', category: 'digital' },
+    { name: 'Fax', category: 'digital' },
+    { name: 'HIS', category: 'digital' },
+    { name: 'Scanner', category: 'digital' },
+    { name: 'Label printer', category: 'digital' },
+    { name: 'Other digital medium', category: 'digital' },
+    { name: 'Paper chart', category: 'physical' },
+    { name: 'Paper form', category: 'physical' },
+    { name: 'Sample with form', category: 'physical' },
+    { name: 'Whiteboard', category: 'physical' },
+    { name: 'Other physical medium', category: 'physical' },
+    { name: 'Face-to-face', category: 'oral' },
+    { name: 'Other oral medium', category: 'oral' }
+  ],
+  // Activity buttons (timeline of the observed stakeholder). The VA/RNVA/NVA classification
+  // is NOT stored here but in the analysis package, so it can be changed retrospectively.
+  activities: [
+    'Create / document information',
+    'Pass on information',
+    'Retrieve information',
+    'Convert information',
+    'Search for information',
+    'Clarify / query',
+    'Wait for information',
+    'Non-information activity'
+  ],
+  // Process steps per process (illustrative examples – to be replaced after the baseline interview).
+  // The transfer form shows the steps of the process selected for the session.
+  processSteps: {
+    'Patient admission': ['Registration at admission desk', 'Registration in HIS', 'Label and wristband printing',
+      'Nursing admission / anamnesis', 'Medical anamnesis and examination', 'Informed consent', 'Ordering of diagnostics',
+      'Bed assignment / transfer to ward', 'Handover', 'Other step'],
+    'Diagnosis': ['Ordering of examination', 'Scheduling of appointment', 'Patient transport to examination', 'Examination',
+      'Findings report', 'Communication of findings', 'Ward round', 'Handover', 'Other step'],
+    'Treatment': ['Medication order', 'Medication preparation', 'Medication administration', 'Preparation for procedure / surgery',
+      'Ward round', 'Treatment documentation', 'Handover', 'Other step'],
+    'Discharge': ['Discharge decision', 'Discharge letter', 'Follow-up arrangements', 'Patient information',
+      'Transport organisation', 'Discharge in HIS', 'Handover', 'Other step'],
+    'Other': ['Handover', 'Ward round', 'Other step']
+  },
+  // Setting removed (14 Nov 2026): one process category only – process (session) and process step;
+  // handover and ward round are process steps.
+  infoTypes: ['Patient information', 'Coordination information'],
+  urgency: ['Urgent', 'Semi-urgent', 'Routine', 'Unclear'],
+  // Information states following Spicker et al. (2026, p. 7), incl. person-specific knowledge.
+  // A transfer from knowledge to another state counts as media disruption; one ending in knowledge does not.
+  statesSource: ['Digital', 'Physical', 'Oral', 'Knowledge (person)', 'Unknown'],
+  statesTarget: ['Digital', 'Physical', 'Oral', 'Knowledge (person)'],
+  existsOptions: ['Yes – system', 'Yes – paper', 'No', 'Unclear'],
+  waitingReasons: ['Patient backlog', 'Work backlog', 'Person not reachable', 'System loading/printing/updating', 'Information missing', 'Other'],
+  granularity: ['Too coarse', 'Adequate', 'Too fine'],
+  purposes: ['Inform', 'Request information', 'Request action', 'Other purpose'],
+  yesno: ['Yes', 'No'],
+  // Interruption form (recording elements following Hopkinson & Jennings, 2013)
+  // Self = the observed stakeholder interrupts their own work (internal interruption, e.g. mistake noticed)
+  interruptionExtraSources: ['Self (observed stakeholder)', 'Alarm / device', 'Other source'],
+  // Origin of an interruption: internal (e.g. mistake, re-prioritization) or external (event outside the current workflow)
+  interruptionOrigins: ['Internal', 'External'],
+  interruptionMedia: ['Face-to-face', 'Telephone', 'Pager', 'Messenger', 'Call bell', 'Alarm / monitor', 'Other medium'],
+  interruptionReasons: ['Information request', 'Information delivery', 'Request for action / help', 'Alarm / device signal', 'Mistake noticed',
+    'Re-prioritization of tasks', 'Social / non-work', 'Other'],
+  interruptionInfoTypes: ['Patient information', 'Coordination information', 'No information'],
+  interruptionOutcomes: ['Resumed', 'Resumed later', 'Abandoned', 'Delegated', 'Unclear']
+};
+
+/* Fields that are pre-selected in a new transfer form (fast live entry). */
+const TRANSFER_DEFAULTS = { successful: 'Yes', query_needed: 'No', automated: 'No', interrupting: 'No' };
+
+/* Session fields chosen by chips on the setup screen. */
+// Observer ID removed (12 Nov 2026): one observer for now; can be added again for several observers.
+const SETUP_FIELDS = ['shift', 'process', 'stakeholder_role', 'stakeholder_experience'];
+
+/* Column order of the exports = data dictionary in the README. */
+const COLS_SESSION = ['session_id', 'ward', 'shift', 'process', 'process_other', 'stakeholder_role', 'stakeholder_role_other',
+  'stakeholder_experience', 'start', 'end', 'tool_version'];
+const COLS_TIMELINE = ['session_id', 'segment_id', 'activity', 'start', 'end', 'duration_s', 'is_interruption', 'interruption_origin', 'interrupted_activity',
+  'interruption_source', 'interruption_source_other', 'interruption_medium', 'interruption_medium_other', 'interruption_reason',
+  'interruption_reason_other', 'interruption_info_type', 'interruption_urgency', 'interruption_outcome', 'interruption_note',
+  'linked_transfer_id', 'time_corrected'];
+const COLS_STEPS = ['session_id', 'process_step_id', 'start', 'providing_stakeholder', 'providing_stakeholder_other', 'requesting_stakeholder', 'requesting_stakeholder_other',
+  'initiative', 'trigger', 'trigger_other', 'process_step', 'process_step_other', 'case_id', 'n_transfers', 'media_used'];
+const COLS_TRANSFERS = ['session_id', 'transfer_id', 'process_step_id', 'initiative', 'trigger', 'trigger_other', 'direction', 'contact_id', 'parallel_of', 'transfer_role', 'timestamp', 'end', 'duration_s', 'end_at_save', 'value_class', 'time_corrected', 'timestamp_recorded', 'running_activity', 'during_interruption',
+  'case_id', 'process_step', 'process_step_other',
+  'sender', 'sender_other', 'receiver', 'receiver_other', 'successful', 'follow_up_of', 'info_type', 'info_type_secondary', 'urgency',
+  'state_source', 'medium', 'medium_other', 'medium_category', 'state_target', 'query_needed', 'automated', 'interrupting', 'interrupted', 'interruption_id',
+  'already_exists', 'waiting_reason', 'waiting_reason_other', 'deviation'];
+
+/* =========================================================================
+   2. STATE AND STORAGE
+   All sessions are kept in one object { session_id: session } in localStorage.
+   ========================================================================= */
+const LS_CFG = 'obs_pst_config_v1';       // situation version: own storage, separate from index.html
+const LS_SESSIONS = 'obs_pst_sessions_v1';
+const LS_CURRENT = 'obs_pst_current_v1';
+const LS_OLD_SESSION = 'obs_pst_session_old';
+
+let cfg = loadConfig();
+/** Saved settings; keys added in a newer version are taken from the defaults. Settings older than v0.2
+    get the new experience categories (decision of 12 Nov 2026). */
+function loadConfig() {
+  const saved = loadJSON(LS_CFG);
+  if (!saved) return structuredClone(DEFAULT_CONFIG);
+  const merged = { ...structuredClone(DEFAULT_CONFIG), ...saved };
+  if ((saved.version || '0') < '0.2') merged.experience = [...DEFAULT_CONFIG.experience];
+  if ((saved.version || '0') < '0.3') {   // knowledge state back in (12 Nov 2026); situation version: media in columns
+    merged.statesSource = [...DEFAULT_CONFIG.statesSource]; merged.statesTarget = [...DEFAULT_CONFIG.statesTarget];
+    merged.media = structuredClone(DEFAULT_CONFIG.media);
+  }
+  if ((saved.version || '0') < '0.4') merged.staffRoles = [...DEFAULT_CONFIG.staffRoles];   // flex team / agency staff as roles
+  if ((saved.version || '0') < '0.5') { merged.triggers = [...DEFAULT_CONFIG.triggers]; merged.initiatives = [...DEFAULT_CONFIG.initiatives]; }   // initiative + single trigger
+  if ((saved.version || '0') < '0.6') {   // 14 Nov 2026: Patient admission, ICU nurse, Flex team, interruption origin
+    ['processes', 'staffRoles', 'interruptionExtraSources', 'interruptionOrigins', 'interruptionReasons'].forEach(k => { merged[k] = structuredClone(DEFAULT_CONFIG[k]); });
+    merged.processSteps = { ...merged.processSteps };
+    if (merged.processSteps['Patient admission process']) { merged.processSteps['Patient admission'] = merged.processSteps['Patient admission process']; delete merged.processSteps['Patient admission process']; }
+  }
+  if ((saved.version || '0') < '0.9') {   // 14 Nov 2026: setting removed; handover / ward round as process steps
+    merged.processes = [...DEFAULT_CONFIG.processes]; merged.processSteps = structuredClone(DEFAULT_CONFIG.processSteps); delete merged.settings;
+  }
+  if ((saved.version || '0') < '1.0') {   // 15 Nov 2026: digital instead of electronic
+    ['mediaCategories', 'media', 'statesSource', 'statesTarget'].forEach(k => { merged[k] = structuredClone(DEFAULT_CONFIG[k]); });
+  }
+  if ((saved.version || '0') < '1.2') merged.interruptionExtraSources = [...DEFAULT_CONFIG.interruptionExtraSources];   // 'Self' back in (15 Nov 2026)
+  // store the new version so the migrations above run only once (before 15 Nov 2026 the version was never updated)
+  if (saved.version !== DEFAULT_CONFIG.version) { merged.version = DEFAULT_CONFIG.version; saveJSON(LS_CFG, merged); }
+  return merged;
+}
+let sessions = loadJSON(LS_SESSIONS) || {};
+let S = null;                 // session currently open on the observation screen
+let draftSetup = {};          // selections on the setup screen
+let setupFromSession = false; // setup screen opened via "Session data" of an existing session
+let editing = null;           // transfer object currently in the form
+
+/** Safe localStorage access: may throw in private mode or embedded contexts. */
+function loadJSON(key) { try { const v = localStorage.getItem(key); return v ? JSON.parse(v) : null; } catch (e) { return null; } }
+function saveJSON(key, val) { try { localStorage.setItem(key, JSON.stringify(val)); return true; } catch (e) { toast('Warning: autosave failed – export now'); return false; } }
+function persist() { if (S) sessions[S.session_id] = S; saveJSON(LS_SESSIONS, sessions); }
+function setCurrent(id) { try { id ? localStorage.setItem(LS_CURRENT, id) : localStorage.removeItem(LS_CURRENT); } catch (e) {} }
+function getCurrent() { try { return localStorage.getItem(LS_CURRENT); } catch (e) { return null; } }
+
+/** Migration from the earlier single-session draft. */
+(function migrate() {
+  const old = loadJSON(LS_OLD_SESSION);
+  if (old && old.session_id && !sessions[old.session_id]) { sessions[old.session_id] = old; saveJSON(LS_SESSIONS, sessions); if (!old.end) setCurrent(old.session_id); }
+  try { localStorage.removeItem(LS_OLD_SESSION); } catch (e) {}
+  const a = normalizeDirections(Object.values(sessions)), b = normalizeTriggers(Object.values(sessions)), c = normalizeRenamed(Object.values(sessions));
+  if (a || b || c) saveJSON(LS_SESSIONS, sessions);
+})();
+/** Values renamed on 14 Nov 2026 (process and role names; setting removed) in sessions, process steps, transfers and interruptions. */
+function normalizeRenamed(list) {
+  const map = { 'Patient admission process': 'Patient admission', 'Flex team (float pool)': 'Flex team' };
+  const keys = ['process', 'stakeholder_role', 'transmitter', 'receiver', 'sender', 'interruption_source'];
+  let changed = false;
+  const fix = x => {
+    keys.forEach(k => { if (map[x[k]]) { x[k] = map[x[k]]; changed = true; } });
+    // 15 Nov 2026: digital instead of electronic
+    ['state_source', 'state_target'].forEach(k => { if (x[k] === 'Electronic') { x[k] = 'Digital'; changed = true; } });
+    if (x.medium_category === 'electronic') { x.medium_category = 'digital'; changed = true; }
+    if (x.medium === 'Other electronic medium') { x.medium = 'Other digital medium'; changed = true; }
+    // setting removed on 14 Nov 2026: handover / ward round move to an empty process step, other settings are dropped
+    if ('setting' in x) {
+      if (!x.process_step && (x.setting === 'Handover' || x.setting === 'Ward round')) x.process_step = x.setting;
+      delete x.setting; delete x.setting_other; changed = true;
+    }
+    if (x.process === 'Ward round') { x.process = 'Other'; x.process_other = x.process_other || 'Ward round'; changed = true; }
+  };
+  list.forEach(s => { fix(s); [...(s.situations || []), ...(s.transfers || []), ...(s.timeline || [])].forEach(fix); });
+  return changed;
+}
+/**
+ * Trigger until 13 Nov 2026: multiple choice mixing push/pull and causes. Push/pull move to the initiative,
+ * the causes are renamed; if several causes remain, the first one is kept and the others go to trigger_other.
+ */
+function normalizeTriggers(list) {
+  let changed = false;
+  list.forEach(s => [...(s.situations || []), ...(s.transfers || [])].forEach(x => {
+    const vals = (x.trigger || '').split('; ').filter(Boolean);
+    if (!vals.some(v => v.startsWith('Push (') || v.startsWith('Pull (') || OLD_TRIGGERS[v]) && vals.length < 2) return;
+    if (!x.initiative) x.initiative = vals.includes('Pull (requested)') ? 'Pull' : vals.includes('Push (sent unrequested)') ? 'Push' : '';
+    const causes = vals.filter(v => !v.startsWith('Push (') && !v.startsWith('Pull (')).map(v => OLD_TRIGGERS[v] || v);
+    x.trigger = causes[0] || '';
+    if (causes.length > 1) x.trigger_other = [x.trigger_other, 'also: ' + causes.slice(1).join('; ')].filter(Boolean).join(' · ');
+    changed = true;
+  }));
+  return changed;
+}
+/** Earlier direction values (A/B, transmitter/receiver; until 12 Nov 2026) → providing / requesting; true if anything changed. */
+function normalizeDirections(list) {
+  let changed = false;
+  list.forEach(s => (s.transfers || []).forEach(t => {
+    if (['A → B', 'Transmitter → receiver'].includes(t.direction)) { t.direction = FWD; changed = true; }
+    if (['B → A', 'Receiver → transmitter'].includes(t.direction)) { t.direction = BWD; changed = true; }
+  }));
+  return changed;
+}
+
+/** ISO timestamp in local time with offset, e.g. 2026-11-02T10:15:03+01:00 */
+function isoLocal(d = new Date()) {
+  const p = n => String(n).padStart(2, '0');
+  const off = -d.getTimezoneOffset(), sign = off >= 0 ? '+' : '-';
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}T${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}` +
+    `${sign}${p(Math.floor(Math.abs(off) / 60))}:${p(Math.abs(off) % 60)}`;
+}
+const hhmmss = iso => iso ? iso.slice(11, 19) : '';
+function fmtDur(sec) { sec = Math.max(0, Math.round(sec)); const m = Math.floor(sec / 60), s = sec % 60; return `${m}:${String(s).padStart(2, '0')}`; }
+
+function newSession(setup) {
+  const now = isoLocal();
+  let id = 'S' + now.slice(0, 16).replace(/[-:T]/g, '');   // e.g. S202611021015
+  while (sessions[id]) id += 'b';                          // two sessions in the same minute
+  return {
+    session_id: id, ...setup,
+    start: now, end: '', tool_version: cfg.version,
+    timeline: [],          // segments {segment_id, activity, start, end, is_interruption, interrupted_activity}
+    transfers: [],         // transfer records
+    situations: [],        // situations (situation version)
+    currentSituation: null, nextSituation: 1,
+    cases: [],             // case pseudonyms V01, V02 ...
+    currentCase: '',
+    nextTransfer: 1, nextSegment: 1
+  };
+}
+const isOpen = s => !!s && !s.end;
+const openSessions = () => Object.values(sessions).filter(isOpen);
+
+/* =========================================================================
+   3. DERIVED LISTS FOR THE FORM
+   ========================================================================= */
+function lists() {
+  return {
+    ...cfg,
+    participants: [...cfg.staffRoles, cfg.patientRole, ...cfg.systems],
+    receivers: [...cfg.staffRoles, cfg.patientRole, ...cfg.systems, cfg.groupReceiver],
+    mediaNames: cfg.media.map(m => m.name),
+    interruptionOrigins: cfg.interruptionOrigins || ['Internal', 'External'],
+    interruptionSources: [...cfg.staffRoles, cfg.patientRole, ...(cfg.interruptionExtraSources || [])],
+    stepsOfProcess: stepsFor(S && S.process),
+    __cases: S ? S.cases : [],
+    valueClasses: VALUE_CLASSES,
+    __directions: [FWD, BWD]
+  };
+}
+/** Process steps of a process; also accepts an older flat list in the settings. */
+function stepsFor(process) {
+  const ps = cfg.processSteps;
+  if (Array.isArray(ps)) return ps;
+  return (ps && (ps[process] || ps['Other'])) || ['Other step'];
+}
+function mediumCategory(name) { const m = cfg.media.find(x => x.name === name); return m ? m.category : ''; }
+function isSystemOrDocument(receiver) { return cfg.systems.includes(receiver) || receiver === cfg.groupReceiver; }
+const isOther = opt => /^other/i.test(opt);
+
+/* =========================================================================
+   4. TIMELINE (activity buttons + interruption)
+   A tap starts an activity and closes the previous segment (gap-free timeline).
+   ========================================================================= */
+function openSegment() { return S.timeline.find(s => !s.end); }
+function closeOpenSegment(at) { const o = openSegment(); if (o) o.end = at; }
+function startSegment(activity, at, isInterruption = false, interrupted = '') {
+  closeOpenSegment(at);
+  S.timeline.push({ segment_id: S.nextSegment++, activity, start: at, end: '', is_interruption: isInterruption ? 'Yes' : 'No', interrupted_activity: interrupted });
+}
+function currentActivity() { const o = S && openSegment(); return o ? (o.is_interruption === 'Yes' ? o.interrupted_activity : o.activity) : ''; }
+function inInterruption() { const o = S && openSegment(); return !!(o && o.is_interruption === 'Yes'); }
+
+/* Backdating of the next activity change (time correction 2): "now", 30 s, 1 min, 2 min ago.
+   The start is never set before the start of the running segment. */
+let backdateSec = 0;
+const BACKDATE = [[0, 'now'], [30, '30 s ago'], [60, '1 min ago'], [120, '2 min ago']];
+function changeTime() {
+  let d = new Date(Date.now() - backdateSec * 1000);
+  const o = openSegment();
+  if (o && d < new Date(o.start)) d = new Date(o.start);
+  const corrected = backdateSec > 0;
+  backdateSec = 0;                      // back to "now" after each use
+  return { at: isoLocal(d), corrected };
+}
+function markLast(corrected) { if (corrected) S.timeline[S.timeline.length - 1].time_corrected = 'Yes'; }
+
+function onActivity(name) {
+  if (inInterruption()) { toast('End the interruption first'); return; }
+  const o = openSegment(); if (o && o.activity === name) return;
+  const { at, corrected } = changeTime();
+  startSegment(name, at); markLast(corrected); persist(); renderObserve();
+}
+function onInterrupt() {
+  const { at: now, corrected } = changeTime();
+  if (inInterruption()) {                              // end of the interruption (no activity timeline in this version)
+    closeOpenSegment(now);
+  } else {
+    startSegment('Interruption', now, true, '');
+    markLast(corrected); persist(); renderObserve();
+    openInterruptionForm(S.timeline[S.timeline.length - 1].segment_id);
+    return;
+  }
+  markLast(corrected); persist(); renderObserve();
+}
+
+/** Interruption started / ended from inside the open transfer form; the transfer is marked as interrupted. */
+function onInterruptInForm() {
+  if (!editing || S.end) return;
+  const now = isoLocal();
+  if (inInterruption()) {
+    closeOpenSegment(now); persist(); renderObserve(); renderFormInterruption(); toast('Interruption ended');
+    return;
+  }
+  startSegment('Interruption', now, true, '');
+  const seg = S.timeline[S.timeline.length - 1];
+  seg.during_transfer = 'Yes';
+  editing.interrupted = 'Yes';
+  editing.interruption_id = [editing.interruption_id, seg.segment_id].filter(Boolean).join('; ');
+  persist(); renderObserve(); renderFormInterruption();
+  openInterruptionForm(seg.segment_id, true);
+}
+function renderFormInterruption() {
+  const b = $('tfInterrupt'); if (!b || !editing) return;
+  b.classList.toggle('hidden', !!S.end);
+  b.classList.toggle('on', inInterruption());
+  b.textContent = inInterruption() ? 'End interruption' : 'Interruption during this transfer';
+  $('tfIntInfo').textContent = editing.interrupted === 'Yes' ? `transfer interrupted (interruption ${editing.interruption_id})` : '';
+}
+
+/* ---------- interruption details (similar to the transfer form) ---------- */
+let editingInt = null;   // working copy of the interruption segment
+function openInterruptionForm(segmentId, fromTransfer = false) {
+  const seg = S.timeline.find(g => g.segment_id === segmentId); if (!seg) return;
+  editingInt = structuredClone(seg);
+  const L = lists();
+  $('intMeta').textContent = `Started ${hhmmss(seg.start)}${seg.end ? ' · ended ' + hhmmss(seg.end) : ' · running'} ${seg.during_transfer === 'Yes' ? ' · during a transfer' : ''}`;
+  document.querySelectorAll('#mdlInterruption [data-int]').forEach(el => renderChips(el, L[el.dataset.list] || [], editingInt, el.dataset.int, false));
+  $('intNote').value = editingInt.interruption_note || '';
+  $('intSaveTransfer').classList.toggle('hidden', fromTransfer || !!editingInt.linked_transfer_id || !!S.end || !!editing);
+  const m = $('mdlInterruption'); m.classList.add('open'); m.scrollTop = 0;
+}
+function saveInterruptionForm(recordTransfer) {
+  editingInt.interruption_note = $('intNote').value.trim();
+  const i = S.timeline.findIndex(g => g.segment_id === editingInt.segment_id);
+  const keys = Object.keys(editingInt).filter(k => k.startsWith('interruption_'));
+  keys.forEach(k => { S.timeline[i][k] = editingInt[k]; });
+  const seg = S.timeline[i];
+  persist(); $('mdlInterruption').classList.remove('open'); editingInt = null; renderObserve(); renderFormInterruption(); toast('Interruption saved');
+  if (recordTransfer) {
+    // pre-filled transfer: interrupter -> observed stakeholder, at the start of the interruption (rule R16)
+    const src = seg.interruption_source || '';
+    const L = lists();
+    const sender = src.startsWith('Self') ? (S.stakeholder_role || '') : L.participants.includes(src) ? src : (src ? 'Other staff' : '');
+    const medium = cfg.media.some(m => m.name === seg.interruption_medium) ? seg.interruption_medium : (seg.interruption_medium ? 'Other digital medium' : '');
+    // the interruption becomes a new process step (step to be completed; interrupter = providing, observed stakeholder = requesting stakeholder; editable)
+    ensureSituations();
+    const sit = { session_id: S.session_id, situation_id: S.nextSituation++, start: seg.start, case_id: S.currentCase,
+      transmitter: sender, transmitter_other: sender === 'Other staff' && src !== 'Other staff' ? (seg.interruption_source_other || src) : '',
+      receiver: S.stakeholder_role || '' };
+    S.situations.push(sit); S.currentSituation = sit.situation_id; persist();
+    editing = {
+      session_id: S.session_id, transfer_id: null, timestamp: seg.start, timestamp_recorded: seg.start,
+      running_activity: seg.interrupted_activity, during_interruption: 'Yes', ...TRANSFER_DEFAULTS, interrupting: 'Yes',
+      direction: FWD, medium, medium_other: isOther(medium) ? (seg.interruption_medium_other || seg.interruption_medium) : '',
+      query_needed: seg.interruption_reason === 'Information request' ? 'Yes' : 'No',
+      info_type: ['Patient information', 'Coordination information'].includes(seg.interruption_info_type) ? seg.interruption_info_type : '',
+      urgency: seg.interruption_urgency || '', __linkSegment: seg.segment_id
+    };
+    applySituation(editing, sit);
+    openForm(true);
+  }
+}
+
+/** Activity running at a given time (used when the transfer time is corrected). */
+function activityAt(iso) {
+  const t = new Date(iso);
+  const seg = S.timeline.find(g => new Date(g.start) <= t && (!g.end || t < new Date(g.end)));
+  if (!seg) return '';
+  return seg.is_interruption === 'Yes' ? seg.interrupted_activity : seg.activity;
+}
+
+/* =========================================================================
+   5. TRANSFERS
+   ========================================================================= */
+/* ---------- process steps (internally: "situations"; transmitter = providing, receiver = requesting stakeholder) ---------- */
+let editingSit = null, sitIsNew = false, afterSitSave = null;
+function ensureSituations() { if (!S.situations) { S.situations = []; S.nextSituation = 1; S.currentSituation = null; } }
+const currentSituation = () => S && S.situations ? S.situations.find(x => x.situation_id === S.currentSituation) : null;
+/** Trigger (single choice; older data may hold "a; b"); "Other trigger" is replaced by its clarification text. */
+function triggerLabel(x) {
+  return (x.trigger || '').split('; ').filter(Boolean).map(v => isOther(v) && x.trigger_other ? x.trigger_other : v).join('; ');
+}
+function sitLabel(x, k) { return isOther(x[k] || '') && x[k + '_other'] ? x[k + '_other'] : (x[k] || '?'); }
+
+function openSituationForm(sit, isNew, prefill = {}) {
+  ensureSituations();
+  sitIsNew = isNew;
+  editingSit = isNew ? { session_id: S.session_id, situation_id: null, case_id: S.currentCase, ...prefill } : structuredClone(sit);
+  const L = lists();
+  $('sitTitle').textContent = isNew ? 'New process step' : `Process step ${editingSit.situation_id}`;
+  $('sitDelete').classList.toggle('hidden', isNew);
+  document.querySelectorAll('#mdlSituation [data-sit]').forEach(el => renderChips(el, L[el.dataset.list] || [], editingSit, el.dataset.sit, !!el.dataset.multi));
+  const m = $('mdlSituation'); m.classList.add('open'); m.scrollTop = 0;
+}
+/**
+ * Copies the process-step fields into a transfer. With FWD / BWD, sender and receiver follow the direction;
+ * with OTHER_DIR (further stakeholders involved) the sender and receiver chosen in the form are kept.
+ */
+function applySituation(t, sit) {
+  const d = t.direction || FWD;
+  t.situation_id = sit.situation_id; t.contact_id = 'P' + sit.situation_id; t.transfer_role = 'Process step';
+  ['initiative', 'trigger', 'trigger_other', 'process_step', 'process_step_other', 'case_id'].forEach(k => { t[k] = sit[k] || ''; });
+  if (d === OTHER_DIR) return;
+  const fwd = d.startsWith('A') || d.startsWith('Transmitter') || d.startsWith('Providing');
+  t.direction = fwd ? FWD : BWD;
+  t.sender = fwd ? sit.transmitter : sit.receiver; t.sender_other = fwd ? (sit.transmitter_other || '') : (sit.receiver_other || '');
+  t.receiver = fwd ? sit.receiver : sit.transmitter; t.receiver_other = fwd ? (sit.receiver_other || '') : (sit.transmitter_other || '');
+}
+/** Direction that matches the chosen sender / receiver of a transfer (OTHER_DIR if they differ from the pair). */
+function directionFor(t, sit) {
+  if (t.sender === sit.transmitter && t.receiver === sit.receiver) return FWD;
+  if (t.sender === sit.receiver && t.receiver === sit.transmitter) return BWD;
+  return OTHER_DIR;
+}
+/** Transfer media as columns by category; one selection across all columns; "Other … medium" opens a text field. */
+function renderMediaColumns() {
+  const obj = editing; const box = $('tfMedia'); box.innerHTML = '';
+  const cats = cfg.mediaCategories || [...new Set(cfg.media.map(m => m.category))];
+  box.style.setProperty('--n', cats.length);
+  cats.forEach(cat => {
+    const col = document.createElement('div'); col.className = 'medcol';
+    col.innerHTML = `<h4>${esc(cat)}</h4>`;
+    const chips = document.createElement('div'); chips.className = 'chips';
+    col.appendChild(chips); box.appendChild(col);
+    const names = cfg.media.filter(m => m.category === cat).map(m => m.name);
+    // proxy object: each column shows the selection only if the medium belongs to it
+    // new transfer: multiple choice across all columns ("a; b"); saved as one transfer per medium (parallel_of)
+    const multi = obj.transfer_id === null;
+    const chosen = (obj.medium || '').split('; ').filter(Boolean);
+    const proxy = { medium: multi ? chosen.filter(m => names.includes(m)).join('; ') : (names.includes(obj.medium) ? obj.medium : ''), medium_other: obj.medium_other || '' };
+    renderChips(chips, names, proxy, 'medium', multi, () => {
+      if (multi) {
+        const after = [...chosen.filter(m => !names.includes(m)), ...(proxy.medium || '').split('; ').filter(Boolean)];
+        const added = after.filter(m => !chosen.includes(m));
+        // pre-set medium: the first tap on another medium replaces it; a tap on the pre-set medium confirms it (then add further media)
+        obj.medium = (obj.__mediumPreset ? (added.length ? added : chosen) : after).join('; ');
+        obj.__mediumPreset = false;
+      }
+      else obj.medium = proxy.medium;
+      obj.medium_other = proxy.medium_other;
+      renderMediaColumns();
+    });
+    const inp = chips.nextElementSibling;
+    if (inp && inp.classList.contains('other-input')) inp.oninput = () => { proxy.medium_other = obj.medium_other = inp.value.trim(); };
+  });
+}
+function saveSituationForm() {
+  if (!editingSit.process_step || !editingSit.transmitter || !editingSit.receiver) { toast('Process step, providing and requesting stakeholder are required'); return; }
+  if (sitIsNew) {
+    editingSit.situation_id = S.nextSituation++; editingSit.start = isoLocal();
+    S.situations.push(editingSit); S.currentSituation = editingSit.situation_id;
+  } else {
+    const i = S.situations.findIndex(x => x.situation_id === editingSit.situation_id); S.situations[i] = editingSit;
+    S.transfers.filter(t => t.situation_id === editingSit.situation_id).forEach(t => applySituation(t, editingSit));   // propagate changes
+  }
+  if (editingSit.case_id && !S.cases.includes(editingSit.case_id)) S.cases.push(editingSit.case_id);
+  persist(); $('mdlSituation').classList.remove('open'); renderObserve(); toast('Process step saved');
+  const next = afterSitSave; afterSitSave = null; editingSit = null;
+  if (next) next();
+}
+async function deleteSituation() {
+  const n = S.transfers.filter(t => t.situation_id === editingSit.situation_id).length;
+  if (!(await ask(`Delete process step ${editingSit.situation_id}${n ? ` and its ${n} transfers` : ''}?`))) return;
+  S.transfers = S.transfers.filter(t => t.situation_id !== editingSit.situation_id);
+  S.situations = S.situations.filter(x => x.situation_id !== editingSit.situation_id);
+  if (S.currentSituation === editingSit.situation_id) S.currentSituation = null;
+  persist(); $('mdlSituation').classList.remove('open'); editingSit = null; renderObserve();
+}
+
+/** New transfer in the current process step; direction FWD or BWD. */
+function onNewTransfer(direction = FWD) {
+  if (typeof direction !== 'string') direction = FWD;
+  const sit = currentSituation();
+  if (!sit) { toast('Start a process step first'); afterSitSave = () => onNewTransfer(direction); openSituationForm(null, true); return; }
+  // Timestamp and running activity are captured at the moment of tapping.
+  editing = {
+    session_id: S.session_id, transfer_id: null, timestamp: isoLocal(),
+    running_activity: currentActivity(), during_interruption: inInterruption() ? 'Yes' : 'No',
+    ...TRANSFER_DEFAULTS, direction
+  };
+  // medium, states and type of information default to those of the previous transfer of the process step
+  const prev = [...S.transfers].reverse().find(t => t.situation_id === sit.situation_id);
+  if (prev) {
+    editing.medium = prev.medium || ''; editing.__mediumPreset = !!prev.medium; editing.medium_other = prev.medium_other || '';   // first tap on another medium replaces the pre-set
+    editing.state_source = prev.state_source || ''; editing.state_target = prev.state_target || ''; editing.info_type = prev.info_type || '';
+  }
+  applySituation(editing, sit);
+  if (inInterruption()) editing.interrupting = 'Yes';   // rule R16
+  openForm(true);
+}
+/* Time correction 1: the transfer time can be set back or entered exactly. */
+function withTime(iso, hms) { return iso.slice(0, 11) + hms + iso.slice(19); }   // keeps date and offset
+function setTransferTime(iso) {
+  if (!editing.timestamp_recorded) editing.timestamp_recorded = editing.timestamp;
+  editing.timestamp = iso;
+  editing.time_corrected = editing.timestamp !== editing.timestamp_recorded ? 'Yes' : '';
+  if (editing.time_corrected) { editing.running_activity = activityAt(iso) || editing.running_activity; }
+  renderTimeBar();
+}
+/** Duration of a transfer in seconds (start = timestamp), or null without end. */
+function transferSeconds(t) { return t.timestamp && t.end ? Math.round((new Date(t.end) - new Date(t.timestamp)) / 1000) : null; }
+function renderTimeBar() {
+  $('tfEnd').value = editing.end ? hhmmss(editing.end) : '';
+  const sec = transferSeconds(editing);
+  $('tfEndInfo').textContent = editing.end ? `duration ${fmtDur(sec)} min${sec < 0 ? ' – ends before it starts' : ''}`
+    : (editing.transfer_id === null ? 'not ended yet – saving without "Transfer done" sets the end to the time of saving' : 'no end recorded');
+  document.getElementById('tfTime').value = hhmmss(editing.timestamp);
+  document.getElementById('tfTimeCorr').textContent = editing.time_corrected === 'Yes'
+    ? `corrected (recorded ${hhmmss(editing.timestamp_recorded)})` : '';
+}
+function onEditTransfer(id) { editing = structuredClone(S.transfers.find(t => t.transfer_id === id)); openForm(false); }
+
+function openForm(isNew) {
+  $('tfParties').open = editing.direction === OTHER_DIR;
+  const L = lists();
+  const parallel = editing.transfer_role === 'Secondary';
+  document.getElementById('tfTitle').textContent = isNew
+    ? (parallel ? 'Parallel transfer (same contact)' : 'New transfer')
+    : `Transfer no. ${editing.transfer_id}${parallel ? ' (parallel)' : ''}`;
+  document.getElementById('tfDelete').classList.toggle('hidden', isNew);
+  document.getElementById('tfSaveParallel').classList.toggle('hidden', !!S.end);
+  document.getElementById('tfMeta').textContent = `Tapped at ${hhmmss(editing.timestamp_recorded || editing.timestamp)}` +
+    (editing.during_interruption === 'Yes' ? ' · during interruption' : '') +
+    (editing.situation_id ? ` · process step ${editing.situation_id}` : '');
+  document.querySelectorAll('#mdlTransfer [data-tf]').forEach(el => renderChips(el, L[el.dataset.list] || [], editing, el.dataset.tf, !!el.dataset.multi, updateFormVisibility));
+  renderMediaColumns();
+  document.getElementById('tfSaveParallel').classList.add('hidden');
+  document.getElementById('tfSaveNext').classList.toggle('hidden', !!S.end);
+  if (!editing.timestamp_recorded) editing.timestamp_recorded = editing.timestamp;
+  // follow-up select: earlier unsuccessful attempts (rule R6)
+  const sel = document.getElementById('tfFollow');
+  const failed = S.transfers.filter(t => t.successful === 'No' && t.transfer_id !== editing.transfer_id);
+  sel.innerHTML = '<option value="">–</option>' + failed.map(t => `<option value="${t.transfer_id}">No. ${t.transfer_id} · ${hhmmss(t.timestamp)} · ${esc(t.sender || '?')} → ${esc(t.receiver || '?')}</option>`).join('');
+  sel.value = editing.follow_up_of || '';
+  renderTimeBar();
+  updateFormVisibility();
+  renderFormInterruption();
+  const m = document.getElementById('mdlTransfer'); m.classList.add('open'); m.scrollTop = 0; updateWakeLock();
+}
+function updateFormVisibility() {
+  // sender/receiver follow the chosen direction; direction buttons show the real roles
+  const sit = S.situations && S.situations.find(x => x.situation_id === editing.situation_id);
+  if (sit) {
+    if (editing.sender || editing.receiver) editing.direction = directionFor(editing, sit);   // manual change of sender / receiver
+    applySituation(editing, sit);
+    const A = sitLabel(sit, 'transmitter'), B = sitLabel(sit, 'receiver');
+    $('tfSitInfo').innerHTML = `<b>Process step ${sit.situation_id}${sit.process_step ? ': ' + esc(sitLabel(sit, 'process_step')) : ''}</b> · ${esc(A)} ⇄ ${esc(B)}` +
+      `${sit.case_id ? ' · ' + esc(sit.case_id) : ''}`;
+    const dir = $('tfDir'); dir.innerHTML = '';
+    [[FWD, `${A} → ${B}`], [BWD, `${B} → ${A}`]].forEach(([val, text]) => {
+      const b = document.createElement('button'); b.type = 'button'; b.className = 'chip' + (editing.direction === val ? ' sel' : ''); b.textContent = text;
+      b.onclick = () => { editing.direction = val; applySituation(editing, sit); renderPartyChips(); updateFormVisibility(); };
+      dir.appendChild(b);
+    });
+    if (editing.direction === OTHER_DIR) $('tfParties').open = true;
+    if (editing.direction === OTHER_DIR) { const o = document.createElement('span'); o.className = 'tag'; o.textContent = 'other parties'; dir.appendChild(o); }
+  }
+  // "Information already exists" is only relevant if the receiver is a system or document.
+  document.getElementById('wrapExists').classList.toggle('hidden', !isSystemOrDocument(editing.receiver));
+}
+/** Re-renders the sender / receiver chips after the direction has set them. */
+function renderPartyChips() {
+  const L = lists();
+  document.querySelectorAll('#mdlTransfer [data-tf="sender"], #mdlTransfer [data-tf="receiver"]').forEach(el =>
+    renderChips(el, L[el.dataset.list] || [], editing, el.dataset.tf, false, updateFormVisibility));
+}
+function closeForm() { document.getElementById('mdlTransfer').classList.remove('open'); editing = null; updateWakeLock(); }
+
+/**
+ * Saves the form. With openParallel = true a second transfer of the same contact is
+ * opened immediately (one record per transfer medium, linked by contact_id; rule R1).
+ */
+function saveForm(openParallel = false) {
+  editing.follow_up_of = document.getElementById('tfFollow').value;
+  editing.medium_category = mediumCategory(editing.medium);
+  if (!isSystemOrDocument(editing.receiver)) editing.already_exists = '';
+  const missing = ['sender', 'receiver', 'medium', 'value_class'].filter(k => !editing[k]);
+  const isNewTransfer = editing.transfer_id === null;
+  delete editing.__mediumPreset;
+  const mediaChosen = (editing.medium || '').split('; ').filter(Boolean);
+  if (isNewTransfer && mediaChosen.length > 1) {
+    editing.medium = mediaChosen[0]; editing.medium_category = mediumCategory(editing.medium);
+    editing.__extraMedia = mediaChosen.slice(1); editing.__mediumOther = editing.medium_other || '';
+    if (!isOther(editing.medium)) editing.medium_other = '';
+  }
+  if (isNewTransfer && !editing.end) { editing.end = isoLocal(); editing.end_at_save = 'Yes'; }
+  if (editing.end && new Date(editing.end) < new Date(editing.timestamp)) { toast('The transfer ends before it starts – correct the times'); if (editing.end_at_save === 'Yes' && isNewTransfer) { editing.end = ''; editing.end_at_save = ''; } return; }
+  if (editing.transfer_id === null) {
+    editing.transfer_id = S.nextTransfer++;
+    if (!editing.contact_id) editing.contact_id = editing.transfer_id;
+    S.transfers.push(editing);
+  } else {
+    const i = S.transfers.findIndex(t => t.transfer_id === editing.transfer_id); S.transfers[i] = editing;
+  }
+  if (editing.case_id && !S.cases.includes(editing.case_id)) S.cases.push(editing.case_id);
+  if (editing.__linkSegment) {     // transfer recorded from the interruption form
+    const seg = S.timeline.find(g => g.segment_id === editing.__linkSegment);
+    if (seg) seg.linked_transfer_id = editing.transfer_id;
+    delete editing.__linkSegment;
+  }
+  const saved = editing; let extraNote = '';
+  if (saved.__extraMedia) {   // further media of the same transfer: one record each, linked by parallel_of
+    saved.__extraMedia.forEach(m => {
+      const c = structuredClone(saved); delete c.__extraMedia; delete c.__mediumOther;
+      c.transfer_id = S.nextTransfer++; c.medium = m; c.medium_category = mediumCategory(m);
+      c.medium_other = isOther(m) ? saved.__mediumOther : ''; c.parallel_of = saved.transfer_id;
+      S.transfers.push(c);
+    });
+    extraNote = `${saved.__extraMedia.length + 1} transfers (one per medium)`;
+    delete saved.__extraMedia; delete saved.__mediumOther;
+  }
+  if (isNewTransfer) coupleActivity(saved);
+  persist(); closeForm(); renderObserve();
+  toast((missing.length ? `Saved – missing: ${missing.join(', ')}` : 'Saved') + (extraNote ? ` · ${extraNote}` : ''));
+  if (openParallel === 'next') { onNewTransfer(saved.direction); return; }
+  if (openParallel) {
+    // copy the contact context, leave medium, states and content empty
+    const keep = ['session_id', 'timestamp', 'end', 'end_at_save', 'value_class', 'running_activity', 'during_interruption', 'case_id', 'process_step', 'process_step_other',
+      'sender', 'sender_other', 'receiver', 'receiver_other', 'successful', 'interrupting', 'contact_id'];
+    editing = { ...TRANSFER_DEFAULTS, ...Object.fromEntries(keep.map(k => [k, saved[k] || ''])), transfer_id: null, transfer_role: 'Secondary' };
+    openForm(true);
+  }
+}
+/**
+ * Coupling transfer -> activity: a new transfer sets the matching activity of the observed stakeholder
+ * (can be overridden with the activity buttons). Query needed -> clarify / query; observed -> IT system ->
+ * create / document; observed -> person -> pass on; IT system -> observed -> retrieve; person -> observed ->
+ * pass on (exchange). Not during an interruption or in review mode.
+ */
+function activityForTransfer(t) {
+  const me = S.stakeholder_role;
+  if (!me || (t.sender !== me && t.receiver !== me)) return '';
+  if (t.query_needed === 'Yes') return 'Clarify / query';
+  const sys = x => cfg.systems.includes(x);
+  if (t.sender === me) return sys(t.receiver) ? 'Create / document information' : 'Pass on information';
+  return sys(t.sender) ? 'Retrieve information' : 'Pass on information';
+}
+function coupleActivity(t) {
+  return;                                   // no activity timeline in this version
+  if (S.end || inInterruption()) return;
+  const act = activityForTransfer(t);
+  if (!act || !cfg.activities.includes(act) || currentActivity() === act) return;
+  const o = openSegment();
+  let at = new Date(t.timestamp);
+  if (o && at < new Date(o.start)) at = new Date(o.start);
+  startSegment(act, isoLocal(at));
+  S.timeline[S.timeline.length - 1].set_by_transfer = t.transfer_id;
+  t.running_activity = act;
+}
+async function deleteTransfer() {
+  if (!(await ask('Delete this transfer?'))) return;
+  S.transfers = S.transfers.filter(t => t.transfer_id !== editing.transfer_id);
+  persist(); closeForm(); renderObserve();
+}
+
+
+/* =========================================================================
+   5b. TIMELINE EDITOR (time correction 3)
+   Only the activity and the start of each segment are edited; the end of a segment
+   is the start of the next one (gap-free). The end of the last segment is editable
+   for finished sessions. Deleting a segment extends the previous one.
+   ========================================================================= */
+let tlWork = null;   // working copy of the timeline
+function openTimelineEditor() {
+  if (!S.timeline.length) { toast('No interruptions recorded yet'); return; }
+  tlWork = structuredClone(S.timeline);
+  renderTimelineEditor();
+  $('mdlTimeline').classList.add('open');
+}
+/** Interruptions are independent segments with their own start and end (no gap-free timeline). */
+function renderTimelineEditor() {
+  $('tlRows').innerHTML = tlWork.map((g, i) => {
+    const dur = g.end ? fmtDur((new Date(g.end) - new Date(g.start)) / 1000) : 'running';
+    const act = `Interruption <span class="hint">${g.during_transfer === 'Yes' ? '(during transfer) ' : ''}${g.interruption_source ? esc(g.interruption_source) : ''}</span>
+         <button class="small" data-intdet="${g.segment_id}">Details</button>`;
+    const endCell = g.end ? `<input type="text" inputmode="numeric" maxlength="8" placeholder="hh:mm:ss" data-i="${i}" class="tfield tlEnd" value="${hhmmss(g.end)}">` : '<span class="hint">running</span>';
+    return `<tr><td>${i + 1}${g.time_corrected === 'Yes' ? ' <span class="corr">*</span>' : ''}</td><td>${act}</td>
+      <td><input type="text" inputmode="numeric" maxlength="8" placeholder="hh:mm:ss" data-i="${i}" class="tfield tlStart" value="${hhmmss(g.start)}"></td>
+      <td>${endCell}</td><td>${dur}</td>
+      <td><button class="small danger" data-del="${i}">Delete</button></td></tr>`;
+  }).join('');
+  $('tlMsg').textContent = '';
+  const val = el => el.value.length === 5 ? el.value + ':00' : el.value;
+  document.querySelectorAll('.tlStart').forEach(el => el.onchange = () => {
+    const g = tlWork[el.dataset.i]; g.start = withTime(g.start, val(el)); g.time_corrected = 'Yes'; renderTimelineEditor();
+  });
+  document.querySelectorAll('.tlEnd').forEach(el => el.onchange = () => {
+    const g = tlWork[el.dataset.i]; g.end = withTime(g.end || g.start, val(el)); g.time_corrected = 'Yes'; renderTimelineEditor();
+  });
+  document.querySelectorAll('[data-intdet]').forEach(b => b.onclick = () => {
+    saveTimelineEditor(); openInterruptionForm(Number(b.dataset.intdet));
+  });
+  document.querySelectorAll('[data-del]').forEach(b => b.onclick = () => { tlWork.splice(Number(b.dataset.del), 1); renderTimelineEditor(); });
+}
+function saveTimelineEditor() {
+  const w = [...tlWork].sort((x, y) => new Date(x.start) - new Date(y.start));
+  for (let i = 0; i < w.length; i++) {
+    if (w[i].end && new Date(w[i].end) < new Date(w[i].start)) { $('tlMsg').textContent = `Interruption ${i + 1} ends before it starts.`; return; }
+    if (i && (!w[i - 1].end || new Date(w[i].start) < new Date(w[i - 1].end))) { $('tlMsg').textContent = `Interruptions ${i} and ${i + 1} overlap.`; return; }
+  }
+  S.timeline = w; tlWork = null;
+  persist(); $('mdlTimeline').classList.remove('open'); renderObserve(); toast('Interruptions saved');
+}
+
+/* =========================================================================
+   6. RENDERING
+   ========================================================================= */
+function esc(s) { return String(s ?? '').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c])); }
+
+/**
+ * Renders tap chips for a field. Single choice toggles; multi choice stores "a; b".
+ * If an option starting with "Other" is selected, a text field appears below the chips;
+ * its value is stored as <field>_other.
+ */
+function renderChips(el, options, obj, key, multi, onChange) {
+  el.innerHTML = '';
+  const current = multi ? (obj[key] ? obj[key].split('; ') : []) : obj[key];
+  options.forEach(opt => {
+    const b = document.createElement('button');
+    b.type = 'button'; b.className = 'chip'; b.textContent = opt;
+    if (multi ? current.includes(opt) : current === opt) b.classList.add('sel');
+    b.onclick = () => {
+      if (multi) {
+        const set = new Set(obj[key] ? obj[key].split('; ') : []);
+        set.has(opt) ? set.delete(opt) : set.add(opt);
+        obj[key] = [...set].join('; ');
+      } else {
+        obj[key] = obj[key] === opt ? '' : opt;
+      }
+      renderChips(el, options, obj, key, multi, onChange);
+      if (onChange) onChange();
+    };
+    el.appendChild(b);
+  });
+  // "Other" clarification field
+  let inp = el.nextElementSibling && el.nextElementSibling.classList.contains('other-input') ? el.nextElementSibling : null;
+  if (!options.some(isOther)) { if (inp) inp.remove(); return; }
+  if (!inp) { inp = document.createElement('input'); inp.type = 'text'; inp.className = 'other-input'; inp.placeholder = 'Please specify "Other" (no names, no patient data)'; el.after(inp); }
+  const otherSelected = multi ? current.some(isOther) : isOther(current || '');
+  inp.classList.toggle('hidden', !otherSelected);
+  if (!otherSelected) obj[key + '_other'] = '';
+  inp.value = obj[key + '_other'] || '';
+  inp.oninput = () => { obj[key + '_other'] = inp.value.trim(); };
+}
+
+function show(id) {
+  document.querySelectorAll('.screen').forEach(s => s.classList.toggle('active', s.id === id));
+  window.scrollTo(0, 0);
+}
+function setHeader() {
+  document.getElementById('hdrInfo').textContent = S ? `${S.session_id} · ${S.stakeholder_role || '?'} · ${S.process || ''}${S.end ? ' · finished' : ''}` : '';
+}
+
+/* ---------- menu ---------- */
+function sessionHaystack(s) {
+  // all searchable text of a session (session data, cases, all transfer values)
+  return JSON.stringify([s.session_id, s.observer_id, s.ward, s.shift, s.process, s.process_other, s.stakeholder_role,
+    s.stakeholder_role_other, s.stakeholder_experience, s.note, s.start, s.cases, s.transfers]).toLowerCase();
+}
+function caseMatches(s, q) {
+  // cases whose id or transfers match the query
+  return (s.cases || []).filter(c => c.toLowerCase().includes(q) ||
+    s.transfers.some(t => t.case_id === c && JSON.stringify(t).toLowerCase().includes(q)));
+}
+function renderHome() {
+  S = null; setHeader();
+  const q = document.getElementById('inSearch').value.trim().toLowerCase();
+  const all = Object.values(sessions).sort((a, b) => (b.start || '').localeCompare(a.start || ''));
+  const rows = q ? all.filter(s => sessionHaystack(s).includes(q)) : all;
+  document.getElementById('searchInfo').textContent = q ? `${rows.length} of ${all.length} sessions match "${q}"` : `${all.length} sessions stored on this device`;
+  const open = openSessions();
+  const ob = document.getElementById('openBanner');
+  ob.classList.toggle('hidden', !open.length);
+  ob.innerHTML = open.map(s => `<div class="row"><b>Open session ${esc(s.session_id)}</b><span class="hint">${esc(s.stakeholder_role || '')} · ${esc(s.process || '')} · ${s.transfers.length} transfers</span>
+    <span class="spacer"></span><button class="primary" data-continue="${esc(s.session_id)}">Continue recording</button></div>`).join('');
+  document.getElementById('sessionRows').innerHTML = rows.map(s => {
+    const cm = q ? caseMatches(s, q) : [];
+    const tm = q ? s.transfers.filter(t => JSON.stringify(t).toLowerCase().includes(q)).length : 0;
+    return `<tr>
+      <td><b>${esc(s.session_id)}</b>${s.note ? `<div class="match">${esc(s.note)}</div>` : ''}${q ? `<div class="match">${tm} matching transfers${cm.length ? ' · cases: ' + cm.map(esc).join(', ') : ''}</div>` : ''}</td>
+      <td>${esc((s.start || '').slice(0, 10))}<br><span class="hint">${esc(s.shift || '')} ${hhmmss(s.start).slice(0, 5)}–${hhmmss(s.end).slice(0, 5)}</span></td>
+      <td>${esc(s.ward || '')}<br><span class="hint">${esc(s.process === 'Other' && s.process_other ? s.process_other : s.process || '')}</span></td>
+      <td>${esc(s.stakeholder_role || '')}<br><span class="hint">${esc(s.stakeholder_experience || '')}</span></td>
+      <td>${s.transfers.length}</td>
+      <td>${(s.cases || []).map(esc).join(', ')}</td>
+      <td>${isOpen(s) ? '<span class="tag open">open</span>' : '<span class="tag">finished</span>'}</td>
+      <td style="white-space:nowrap;"><button class="small" data-open="${esc(s.session_id)}">Open</button>
+          <button class="small" data-export="${esc(s.session_id)}">Export</button>
+          <button class="small danger" data-delete="${esc(s.session_id)}">Delete</button></td></tr>`;
+  }).join('') || '<tr><td colspan="8" class="hint">No sessions.</td></tr>';
+  let bytes = 0; try { bytes = (localStorage.getItem(LS_SESSIONS) || '').length; } catch (e) {}
+  document.getElementById('storageInfo').textContent = `Local storage used: ${(bytes / 1024).toFixed(0)} kB (browser limit about 5 MB) · ${APP_VERSION}`;
+  renderInstallBanner(); updateWakeLock();
+  document.querySelectorAll('[data-open]').forEach(b => b.onclick = () => openSession(b.dataset.open));
+  document.querySelectorAll('[data-continue]').forEach(b => b.onclick = () => openSession(b.dataset.continue));
+  document.querySelectorAll('[data-export]').forEach(b => b.onclick = () => exportSessions([sessions[b.dataset.export]], b.dataset.export));
+  document.querySelectorAll('[data-delete]').forEach(b => b.onclick = () => deleteSession(b.dataset.delete));
+}
+function openSession(id) {
+  S = sessions[id]; if (!S) return;
+  if (isOpen(S)) setCurrent(id);
+  show('scrObserve'); renderObserve();
+}
+async function deleteSession(id) {
+  if (!(await ask(`Delete session ${id} with ${sessions[id].transfers.length} transfers from this device? Export it first.`))) return;
+  delete sessions[id]; if (getCurrent() === id) setCurrent(null);
+  saveJSON(LS_SESSIONS, sessions); renderHome(); toast('Session deleted');
+}
+
+/* ---------- setup ---------- */
+function renderSetup() {
+  const L = lists();
+  document.querySelectorAll('#scrSetup [data-field]').forEach(el => renderChips(el, L[el.dataset.list] || [], draftSetup, el.dataset.field, false));
+  document.getElementById('btnResume').classList.toggle('hidden', !setupFromSession);
+  document.getElementById('btnStart').classList.toggle('hidden', setupFromSession);
+  document.getElementById('setupTitle').textContent = setupFromSession ? `Session data – ${S.session_id}${S.end ? ' (finished)' : ' (open)'}` : 'New observation session';
+}
+function newSessionSetup() {
+  S = null; setupFromSession = false; draftSetup = {};
+  document.getElementById('inWard').value = '';
+  setHeader(); show('scrSetup'); renderSetup();
+}
+/** From the observation screen to the session data; the session stays open. */
+function backToSetup() {
+  setupFromSession = true;
+  draftSetup = Object.fromEntries([...SETUP_FIELDS, 'process_other', 'stakeholder_role_other'].map(k => [k, S[k] || '']));
+  document.getElementById('inWard').value = S.ward || '';
+  show('scrSetup'); renderSetup();
+}
+
+/* ---------- observation ---------- */
+function renderObserve() {
+  if (!S) return;
+  setHeader();
+  const ro = !!S.end;   // finished session: review mode
+  document.getElementById('roBanner').classList.toggle('hidden', !ro);
+  ['btnInterrupt', 'btnTransfer', 'btnNewCase', 'btnEnd', 'btnNewSituation'].forEach(id => document.getElementById(id).disabled = ro);
+  ensureSituations();
+  const sit = currentSituation();
+  const card = $('sitCard');
+  card.classList.toggle('hidden', !sit);
+  if (sit) {
+    const n = S.transfers.filter(t => t.situation_id === sit.situation_id).length;
+    card.innerHTML = `<b>Current process step ${sit.situation_id}${sit.process_step ? ': ' + esc(sitLabel(sit, 'process_step')) : ''}</b> <span class="hint">since ${hhmmss(sit.start)} · ${n} transfers</span><br>
+      ${esc(sitLabel(sit, 'transmitter'))} ⇄ ${esc(sitLabel(sit, 'receiver'))}${sit.case_id ? ' · ' + esc(sit.case_id) : ''}
+      <div class="hint">Initiative: ${esc(sit.initiative || '') || '<span style="color:#b00020">not set</span>'} · Trigger: ${esc(triggerLabel(sit)) || '<span style="color:#b00020">not set</span>'}</div>
+      <div class="row" style="margin-top:6px;"><button class="small" id="btnSitEdit">Edit</button><button class="small" id="btnSitEnd">End process step</button></div>`;
+    $('btnSitEdit').onclick = () => openSituationForm(sit, false);
+    $('btnSitEnd').onclick = () => { S.currentSituation = null; persist(); renderObserve(); };
+  }
+  const tb = $('typeButtons'); tb.innerHTML = '';
+  const A = sit ? sitLabel(sit, 'transmitter') : 'Providing', B = sit ? sitLabel(sit, 'receiver') : 'Requesting';
+  [[FWD, `${A} → ${B}`], [BWD, `${B} → ${A}`]].forEach(([val, text]) => {
+    const b = document.createElement('button'); b.className = 'act'; b.style.fontSize = '18px'; b.textContent = text; b.disabled = ro || !sit;
+    b.onclick = () => onNewTransfer(val); tb.appendChild(b);
+  });
+  // activity buttons
+  const cur = currentActivity();
+  const box = document.getElementById('actButtons'); box.innerHTML = '';
+  cfg.activities.forEach(a => {
+    const b = document.createElement('button'); b.className = 'act' + (a === cur ? ' cur' : ''); b.textContent = a; b.disabled = ro;
+    b.onclick = () => onActivity(a); box.appendChild(b);
+  });
+  const bd = document.getElementById('backdateChips'); bd.innerHTML = '';
+  BACKDATE.forEach(([sec, label]) => {
+    const b = document.createElement('button'); b.className = 'chip' + (sec === backdateSec ? ' sel' : ''); b.textContent = label; b.disabled = ro;
+    b.onclick = () => { backdateSec = sec; renderObserve(); };
+    bd.appendChild(b);
+  });
+  document.getElementById('curAct').textContent = ro ? 'session finished' : (inInterruption() ? 'INTERRUPTION running' : 'no interruption');
+  document.getElementById('btnInterrupt').classList.toggle('on', inInterruption());
+  document.getElementById('btnIntDetails').classList.toggle('hidden', !inInterruption());
+  document.getElementById('btnInterrupt').textContent = inInterruption() ? 'End interruption' : 'Interruption';
+  // cases (bar on top)
+  S.caseInfo = S.caseInfo || {};
+  const ci = S.currentCase && S.caseInfo[S.currentCase];
+  $('btnCaseDetails').classList.toggle('hidden', !S.currentCase);
+  $('caseInfo').textContent = S.currentCase ? (ci && (ci.diagnosis || ci.comorbidities) ? `${ci.diagnosis || '–'} · ${ci.comorbidities || '–'}` : 'diagnosis / comorbidities not yet entered') : 'no case selected – process steps are recorded without case';
+  const cc = document.getElementById('caseChips'); cc.innerHTML = '';
+  S.cases.forEach(c => {
+    // selectable also in review mode, so case details can be completed after the session
+    const b = document.createElement('button'); b.className = 'chip' + (c === S.currentCase ? ' sel' : ''); b.textContent = c;
+    b.onclick = () => { S.currentCase = S.currentCase === c ? '' : c; persist(); renderObserve(); };
+    cc.appendChild(b);
+  });
+  // log (newest first)
+  document.getElementById('cnt').textContent = `(${S.situations.length} / ${S.transfers.length})`;
+  const tItem = t => {
+    const tags = [];
+    if (t.transfer_role === 'Secondary') tags.push(`<span class="tag">parallel to #${t.contact_id}</span>`);
+    if (t.successful === 'No') tags.push('<span class="tag warn">failed</span>');
+    if (t.query_needed === 'Yes') tags.push('<span class="tag">query</span>');
+    if (t.interrupting === 'Yes') tags.push('<span class="tag">interrupting</span>');
+    if (!t.sender || !t.receiver || !t.medium || !t.value_class) tags.push('<span class="tag warn">incomplete</span>');
+    const dur = transferSeconds(t);
+    const lab = (k) => esc(isOther(t[k] || '') && t[k + '_other'] ? `${t[k]}: ${t[k + '_other']}` : (t[k] || '?'));
+    return `<div class="log-item" data-id="${t.transfer_id}" style="padding-left:14px;"><span class="t">#${t.transfer_id} ${hhmmss(t.timestamp)}${dur !== null ? ' (' + fmtDur(dur) + ')' : ''}</span>
+      ${t.value_class ? '<b>' + esc(t.value_class) + '</b> · ' : ''}${lab('sender')} → ${lab('receiver')} · <b>${lab('medium')}</b> ${t.case_id ? '· ' + esc(t.case_id) : ''} ${tags.join('')}
+      <div class="hint">${esc(t.info_type || '')}${t.urgency ? ' · ' + esc(t.urgency) : ''}</div></div>`;
+  };
+  const sitHtml = [...S.situations].reverse().map(x => {
+    const ts = S.transfers.filter(t => t.situation_id === x.situation_id).reverse();
+    return `<div class="log-sit" data-sit="${x.situation_id}" style="margin-top:10px;padding:6px 4px;border-top:2px solid #111;cursor:pointer;">
+      <b>Process step ${x.situation_id}${x.process_step ? ': ' + esc(sitLabel(x, 'process_step')) : ''}</b> <span class="t">${hhmmss(x.start)}</span>${x.situation_id === S.currentSituation ? ' <span class="tag open">current</span>' : ''}<br>
+      <span class="hint">${esc(sitLabel(x, 'transmitter'))} ⇄ ${esc(sitLabel(x, 'receiver'))}${x.case_id ? ' · ' + esc(x.case_id) : ''}${x.initiative ? ' · ' + esc(x.initiative) : ''}${x.trigger ? ' · trigger: ' + esc(triggerLabel(x)) : ''}</span></div>` +
+      (ts.map(tItem).join('') || '<p class="hint">No transfers yet.</p>');
+  }).join('');
+  const loose = S.transfers.filter(t => !t.situation_id).reverse().map(tItem).join('');
+  document.getElementById('log').innerHTML = (sitHtml + loose) || '<p class="hint">No process steps yet.</p>';
+  document.querySelectorAll('.log-sit').forEach(el => el.onclick = () => openSituationForm(S.situations.find(x => x.situation_id === Number(el.dataset.sit)), false));
+  document.querySelectorAll('.log-item').forEach(el => el.onclick = () => onEditTransfer(Number(el.dataset.id)));
+  renderExportInfo(); updateWakeLock();
+}
+/** Time since the last export of the open session (reminder to export regularly). */
+function renderExportInfo() {
+  if (!S) return;
+  const el = $('lastExportInfo'); if (!el) return;
+  if (!S.last_export) { el.textContent = 'Not exported yet – export regularly (e.g. every hour and at the end).'; el.classList.toggle('corr', !S.end && S.transfers.length > 0); return; }
+  const min = Math.round((Date.now() - new Date(S.last_export)) / 60000);
+  el.textContent = `Last export: ${hhmmss(S.last_export).slice(0, 5)} (${min} min ago)`;
+  el.classList.toggle('corr', !S.end && min >= 60);
+}
+
+function tick() {
+  const now = new Date();
+  document.getElementById('clock').textContent = now.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+  if (S && !S.end) { const o = openSegment(); document.getElementById('curDur').textContent = o ? fmtDur((now - new Date(o.start)) / 1000) : ''; }
+  else document.getElementById('curDur').textContent = '';
+}
+
+/* =========================================================================
+   7. EXPORT AND IMPORT
+   One session: <id>_session.csv, <id>_timeline.csv, <id>_transfers.csv, <id>_backup.json
+   All data:    ALL_<date>_session.csv … (all sessions in one file per table)
+   ========================================================================= */
+function csvEscape(v) { v = v === undefined || v === null ? '' : String(v); return /[",;\n]/.test(v) ? `"${v.replace(/"/g, '""')}"` : v; }
+function toCSV(cols, rows) { return [cols.join(','), ...rows.map(r => cols.map(c => csvEscape(r[c])).join(','))].join('\r\n'); }
+
+function timelineRows(s) {
+  const end = s.end || isoLocal();
+  return s.timeline.map(seg => {
+    const e = seg.end || end;
+    return { session_id: s.session_id, ...seg, end: e, duration_s: Math.round((new Date(e) - new Date(seg.start)) / 1000) };
+  });
+}
+/** Download of one file (text with BOM so Excel reads UTF-8, or a Blob such as the ZIP). */
+function download(name, text, type) {
+  const blob = text instanceof Blob ? text : new Blob(['\ufeff' + text], { type });
+  const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = name;
+  document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(a.href), 4000);
+}
+
+/* ---- ZIP without libraries (stored entries; reading also accepts deflate via DecompressionStream) ---- */
+const CRC_TABLE = (() => { const t = new Uint32Array(256); for (let n = 0; n < 256; n++) { let c = n; for (let k = 0; k < 8; k++) c = c & 1 ? 0xEDB88320 ^ (c >>> 1) : c >>> 1; t[n] = c >>> 0; } return t; })();
+function crc32(bytes) { let c = 0xFFFFFFFF; for (let i = 0; i < bytes.length; i++) c = CRC_TABLE[(c ^ bytes[i]) & 0xFF] ^ (c >>> 8); return (c ^ 0xFFFFFFFF) >>> 0; }
+/** files: [{name, text}] → Blob (application/zip). Text files get a BOM (as in the single downloads). */
+function zipBlob(files) {
+  const enc = new TextEncoder(), parts = [], central = [];
+  const d = new Date(), dosTime = (d.getHours() << 11) | (d.getMinutes() << 5) | (d.getSeconds() >> 1),
+    dosDate = ((d.getFullYear() - 1980) << 9) | ((d.getMonth() + 1) << 5) | d.getDate();
+  let offset = 0;
+  files.forEach(f => {
+    const name = enc.encode(f.name), data = enc.encode('\ufeff' + f.text), crc = crc32(data);
+    const h = new DataView(new ArrayBuffer(30));
+    [[0, 0x04034b50, 4], [4, 20, 2], [6, 0x0800, 2], [8, 0, 2], [10, dosTime, 2], [12, dosDate, 2], [14, crc, 4], [18, data.length, 4], [22, data.length, 4], [26, name.length, 2], [28, 0, 2]]
+      .forEach(([o, v, n]) => n === 4 ? h.setUint32(o, v, true) : h.setUint16(o, v, true));
+    const c = new DataView(new ArrayBuffer(46));
+    [[0, 0x02014b50, 4], [4, 20, 2], [6, 20, 2], [8, 0x0800, 2], [10, 0, 2], [12, dosTime, 2], [14, dosDate, 2], [16, crc, 4], [20, data.length, 4], [24, data.length, 4], [28, name.length, 2], [30, 0, 2], [32, 0, 2], [34, 0, 2], [36, 0, 2], [38, 0, 4], [42, offset, 4]]
+      .forEach(([o, v, n]) => n === 4 ? c.setUint32(o, v, true) : c.setUint16(o, v, true));
+    parts.push(h, name, data); central.push(c, name);
+    offset += 30 + name.length + data.length;
+  });
+  const size = central.reduce((a, x) => a + x.byteLength, 0), e = new DataView(new ArrayBuffer(22));
+  [[0, 0x06054b50, 4], [4, 0, 2], [6, 0, 2], [8, files.length, 2], [10, files.length, 2], [12, size, 4], [16, offset, 4], [20, 0, 2]]
+    .forEach(([o, v, n]) => n === 4 ? e.setUint32(o, v, true) : e.setUint16(o, v, true));
+  return new Blob([...parts, ...central, e], { type: 'application/zip' });
+}
+/** Reads the entries of a ZIP file → [{name, text}] (stored or deflated entries). */
+async function unzipText(buf) {
+  const v = new DataView(buf), dec = new TextDecoder();
+  let eocd = -1; for (let i = buf.byteLength - 22; i >= Math.max(0, buf.byteLength - 65557); i--) if (v.getUint32(i, true) === 0x06054b50) { eocd = i; break; }
+  if (eocd < 0) throw new Error('not a ZIP file');
+  const n = v.getUint16(eocd + 10, true); let p = v.getUint32(eocd + 16, true); const out = [];
+  for (let k = 0; k < n; k++) {
+    const method = v.getUint16(p + 10, true), csize = v.getUint32(p + 20, true), nlen = v.getUint16(p + 28, true),
+      xlen = v.getUint16(p + 30, true), clen = v.getUint16(p + 32, true), loc = v.getUint32(p + 42, true);
+    const name = dec.decode(new Uint8Array(buf, p + 46, nlen));
+    const start = loc + 30 + v.getUint16(loc + 26, true) + v.getUint16(loc + 28, true);
+    let bytes = new Uint8Array(buf, start, csize);
+    if (method === 8) bytes = new Uint8Array(await new Response(new Blob([bytes]).stream().pipeThrough(new DecompressionStream('deflate-raw'))).arrayBuffer());
+    else if (method !== 0) throw new Error('unsupported ZIP compression');
+    out.push({ name, text: dec.decode(bytes) });
+    p += 46 + nlen + xlen + clen;
+  }
+  return out;
+}
+
+/** All export files of a list of sessions: [{name, text, type}]. */
+function exportFiles(list, prefix) {
+  const files = [];
+  const add = (name, text, type = 'text/csv') => files.push({ name, text, type });
+  add(`${prefix}_session.csv`, toCSV(COLS_SESSION, list));
+  add(`${prefix}_timeline.csv`, toCSV(COLS_TIMELINE, list.flatMap(timelineRows)));
+  add(`${prefix}_cases.csv`, toCSV(['session_id', 'case_id', 'diagnosis', 'comorbidities', 'n_process_steps'], list.flatMap(s => (s.cases || []).map(c => ({
+    session_id: s.session_id, case_id: c, diagnosis: ((s.caseInfo || {})[c] || {}).diagnosis || '', comorbidities: ((s.caseInfo || {})[c] || {}).comorbidities || '',
+    n_process_steps: (s.situations || []).filter(x => x.case_id === c).length })))));
+  add(`${prefix}_process_steps.csv`, toCSV(COLS_STEPS, list.flatMap(s => (s.situations || []).map(x => {
+    const ts = s.transfers.filter(t => t.situation_id === x.situation_id);
+    return { ...x, session_id: s.session_id, process_step_id: x.situation_id, providing_stakeholder: x.transmitter, providing_stakeholder_other: x.transmitter_other,
+      requesting_stakeholder: x.receiver, requesting_stakeholder_other: x.receiver_other, n_transfers: ts.length,
+      media_used: [...new Set(ts.map(t => (isOther(t.medium || '') && t.medium_other) || t.medium).filter(Boolean))].join('; ') };
+  }))));
+  add(`${prefix}_transfers.csv`, toCSV(COLS_TRANSFERS, list.flatMap(s => s.transfers.map(t => ({ ...t, session_id: s.session_id, process_step_id: t.situation_id, duration_s: transferSeconds(t) ?? '' })))));
+  add(`${prefix}_backup.json`, JSON.stringify({ sessions: list, config: cfg, exported: isoLocal() }, null, 2), 'application/json');
+  return files;
+}
+/** True if the browser can hand files to the share sheet (iPad Safari, macOS Safari / Chrome …). */
+function canShareFiles() {
+  try { return !!(navigator.share && navigator.canShare && navigator.canShare({ files: [new File(['x'], 'x.zip', { type: 'application/zip' })] })); } catch (e) { return false; }
+}
+let exportJob = null;   // {list, prefix, files} of the open export dialog
+/** Opens the export dialog for a list of sessions (one ZIP via share sheet or download, or separate files). */
+function exportSessions(list, prefix) {
+  if (!list.length) { toast('Nothing to export'); return; }
+  exportJob = { list, prefix, files: exportFiles(list, prefix) };
+  $('exTitle').textContent = list.length === 1 ? `Export session ${list[0].session_id}` : `Export ${list.length} sessions`;
+  $('exMeta').textContent = `${list.reduce((a, s) => a + s.transfers.length, 0)} transfers · file ${prefix}_export.zip`;
+  $('exList').textContent = 'Contents: ' + exportJob.files.map(f => f.name).join(', ');
+  $('exShare').classList.toggle('hidden', !canShareFiles());
+  $('exMsg').textContent = '';
+  $('mdlExport').classList.add('open');
+}
+function markExported(how) {
+  const now = isoLocal();
+  exportJob.list.forEach(s => { s.last_export = now; if (sessions[s.session_id]) sessions[s.session_id].last_export = now; });
+  saveJSON(LS_SESSIONS, sessions);
+  $('exMsg').textContent = `${how} at ${hhmmss(now)}`;
+  toast(`Exported ${exportJob.list.length} session(s)`);
+  if (S) renderExportInfo();
+}
+async function exportShare() {
+  const zip = zipBlob(exportJob.files), name = `${exportJob.prefix}_export.zip`;
+  const file = new File([zip], name, { type: 'application/zip' });
+  try {
+    await navigator.share({ files: [file], title: name });
+    markExported('Shared');
+  } catch (e) {
+    if (e && e.name === 'AbortError') { $('exMsg').textContent = 'Sharing cancelled – nothing exported.'; return; }
+    $('exMsg').textContent = 'Sharing not possible (' + (e && e.name) + ') – use Download ZIP.';
+  }
+}
+function exportZip() { download(`${exportJob.prefix}_export.zip`, zipBlob(exportJob.files)); markExported('ZIP downloaded'); }
+function exportSeparate() { exportJob.files.forEach(f => download(f.name, f.text, f.type)); markExported('Files downloaded'); }
+function exportAll() { exportSessions(Object.values(sessions), 'ALL_' + isoLocal().slice(0, 10)); }
+
+/** Import a JSON backup (one or all sessions). Existing sessions with the same id are replaced after confirmation. */
+async function importBackup(file) {
+  try {
+    let text;
+    const head = new Uint8Array(await file.slice(0, 4).arrayBuffer());
+    if (head[0] === 0x50 && head[1] === 0x4B) {        // ZIP export: take the *_backup.json inside
+      const entry = (await unzipText(await file.arrayBuffer())).find(e => /_backup\.json$/.test(e.name));
+      if (!entry) throw new Error('no *_backup.json in the ZIP file');
+      text = entry.text;
+    } else text = await file.text();
+    const data = JSON.parse(text.replace(/^\ufeff/, ''));
+    const list = data.sessions || (data.session ? [data.session] : []);
+    if (!list.length) throw new Error('no sessions found');
+    const dup = list.filter(s => sessions[s.session_id]).map(s => s.session_id);
+    if (dup.length && !(await ask(`${dup.length} session(s) already exist (${dup.join(', ')}). Replace them with the backup?`))) return;
+    normalizeDirections(list); normalizeTriggers(list); normalizeRenamed(list); list.forEach(s => { sessions[s.session_id] = s; });
+    saveJSON(LS_SESSIONS, sessions); renderHome(); toast(`Imported ${list.length} session(s)`);
+  } catch (e) { toast('Import failed: ' + e.message); }
+}
+
+
+/* =========================================================================
+   7b. KPI CALCULATION (same logic as src/observation_tool/data.py and kpi.py)
+   ========================================================================= */
+const KPI_COLS = ['n', 'la', 'ci', 'rtci', 'mdi', 'fpyi'];
+const yesv = v => String(v || '').trim().toLowerCase() === 'yes';
+function kpiOptions() {
+  return { includePatients: $('kpiPatients').checked, ciDen: $('kpiCiDen').value, rt: parseFloat($('kpiRt').value.replace(',', '.')) || 5 };
+}
+/** Derived fields of all transfers of one session (media disruption, central system, waiting time …). */
+function deriveSession(s) {
+  const central = cfg.centralSystems || ['HIS'];
+  const byId = Object.fromEntries(s.transfers.map(t => [String(t.transfer_id), t]));
+  return s.transfers.map(t => {
+    const lab = k => (isOther(t[k] || '') && t[k + '_other']) ? t[k + '_other'] : (t[k] || '');
+    const src = t.state_source || '', tgt = t.state_target || '';
+    // ending in knowledge is not counted (Spicker et al., 2026, p. 7); unknown states are not comparable
+    const md = (!src || !tgt || src === 'Unknown' || tgt === 'Unknown') ? null : (tgt.startsWith('Knowledge') ? false : src !== tgt);
+    // follow the chain of failed attempts back to the first one (rule R6)
+    let first = t, seen = new Set();
+    while (first.follow_up_of && byId[first.follow_up_of] && !seen.has(first.follow_up_of)) { seen.add(first.follow_up_of); first = byId[first.follow_up_of]; }
+    const wait = first === t ? 0 : Math.round((new Date(t.timestamp) - new Date(first.timestamp)) / 600) / 100;
+    const rec = t.receiver || '';
+    return { ...t, session_id: s.session_id, sender_l: lab('sender'), receiver_l: lab('receiver'), medium_l: lab('medium'),
+      media_disruption: md, from_central: central.includes(t.sender), receiver_is_person: !!rec && !cfg.systems.includes(rec) && rec !== cfg.groupReceiver,
+      involves_patient: t.sender === cfg.patientRole || rec === cfg.patientRole, waiting_min: wait };
+  });
+}
+const ratio = (a, b) => b ? Math.round(a / b * 1000) / 1000 : null;
+function kpiBase(ts, o) { return ts.filter(t => yesv(t.successful) && (o.includePatients || !t.involves_patient)); }
+function transferKpis(base, o) {
+  const i = base.length, ciBase = o.ciDen === 'all' ? base : base.filter(t => t.receiver_is_person);
+  return {
+    n: i,
+    la: ratio(base.filter(t => yesv(t.automated)).length, i),
+    ci: ratio(ciBase.filter(t => t.from_central).length, ciBase.length),
+    rtci: i ? Math.round((1 - base.filter(t => t.waiting_min > o.rt).length / i) * 1000) / 1000 : null,
+    mdi: ratio(base.filter(t => t.media_disruption === true).length, i),
+    fpyi: i ? Math.round((1 - base.filter(t => yesv(t.query_needed)).length / i) * 1000) / 1000 : null
+  };
+}
+function descriptive(ts) {
+  const contacts = {}; ts.forEach(t => { const k = t.session_id + '|' + (t.parallel_of || t.transfer_id); contacts[k] = (contacts[k] || 0) + 1; });   // transfers with several media (parallel_of)
+  return { recorded: ts.length, failed: ts.filter(t => !yesv(t.successful)).length,
+    waiting: Math.round(ts.reduce((a, t) => a + t.waiting_min, 0) * 10) / 10,
+    redundant: ts.filter(t => (t.already_exists || '').startsWith('Yes')).length,
+    multimedia: Object.values(contacts).filter(n => n > 1).length };
+}
+/** Union of intervals [a, b] (ms). */
+function unionIv(iv) {
+  const out = [];
+  iv.filter(([a, b]) => b > a).sort((x, y) => x[0] - y[0]).forEach(([a, b]) => {
+    if (out.length && a <= out[out.length - 1][1]) out[out.length - 1][1] = Math.max(out[out.length - 1][1], b); else out.push([a, b]);
+  });
+  return out;
+}
+/** Seconds covered by the union of intervals minus the parts covered by cut. */
+function secondsWithout(iv, cut) {
+  const c = unionIv(cut); let ms = 0;
+  unionIv(iv).forEach(([a, b]) => { ms += b - a; c.forEach(([x, y]) => { ms -= Math.max(0, Math.min(b, y) - Math.max(a, x)); }); });
+  return Math.round(ms / 100) / 10;
+}
+/**
+ * Interruption measures from the interruption segments; value-added time from the transfers
+ * (start = timestamp, end, value class chosen by the observer). Per class the union of the transfer
+ * intervals counts (parallel transfers of one contact once), minus interruption time. All recorded
+ * transfers are used (same rule as kpi.transfer_time_indicators in the Python analysis).
+ */
+function timeIndicators(list) {
+  const sec = { VA: 0, RNVA: 0, NVA: 0 }; let intr = 0, intrS = 0, noEnd = 0, noClass = 0;
+  const bySource = {}, byReason = {}, byOrigin = {};
+  list.forEach(s => {
+    const cut = (s.timeline || []).filter(g => g.is_interruption === 'Yes' && g.end).map(g => [new Date(g.start).getTime(), new Date(g.end).getTime()]);
+    const iv = { VA: [], RNVA: [], NVA: [] };
+    s.transfers.forEach(t => {
+      if (!t.timestamp || !t.end) { noEnd++; return; }
+      if (!iv[t.value_class]) { noClass++; return; }
+      iv[t.value_class].push([new Date(t.timestamp).getTime(), new Date(t.end).getTime()]);
+    });
+    VALUE_CLASSES.forEach(c => { sec[c] += secondsWithout(iv[c], cut); });
+  });
+  list.forEach(s => timelineRows(s).forEach(g => {
+    if (g.is_interruption === 'Yes') {
+      intr++; intrS += g.duration_s;
+      const src = (isOther(g.interruption_source || '') && g.interruption_source_other) || g.interruption_source || '(not specified)';
+      const rea = (isOther(g.interruption_reason || '') && g.interruption_reason_other) || g.interruption_reason || '(not specified)';
+      bySource[src] = (bySource[src] || 0) + 1; byReason[rea] = (byReason[rea] || 0) + 1;
+      const ori = g.interruption_origin || '(not specified)';
+      byOrigin[ori] = byOrigin[ori] || { n: 0, s: 0 }; byOrigin[ori].n++; byOrigin[ori].s += g.duration_s;
+      return;
+    }
+  }));
+  const info = sec.VA + sec.RNVA + sec.NVA;
+  return { strict: ratio(sec.VA, info), broad: ratio(sec.VA + sec.RNVA, info), intr, intrS, sec, noEnd, noClass, bySource, byReason, byOrigin };
+}
+function groupKpis(base, keyFn, o) {
+  const g = {}; base.forEach(t => { const k = keyFn(t) || '(empty)'; (g[k] = g[k] || []).push(t); });
+  return Object.keys(g).sort().map(k => ({ key: k, ...transferKpis(g[k], o) }));
+}
+
+let kpiScope = [];     // sessions shown in the KPI view
+let kpiRows = [];      // rows for the CSV download
+function openKpi(list, title) {
+  kpiScope = list; $('kpiTitle').textContent = title; renderKpi(); $('mdlKpi').classList.add('open'); $('mdlKpi').scrollTop = 0;
+}
+function renderKpi() {
+  const o = kpiOptions();
+  const all = kpiScope.flatMap(deriveSession);
+  const base = kpiBase(all, o);
+  const multi = kpiScope.length > 1;
+  const f = v => v === null || v === undefined ? '–' : (typeof v === 'number' && !Number.isInteger(v) ? v.toFixed(3) : v);
+  const tbl = (head, rows) => `<table class="list" style="margin:8px 0 18px;"><thead><tr>${head.map(h => `<th>${esc(h)}</th>`).join('')}</tr></thead>
+    <tbody>${rows.map(r => `<tr>${r.map((c, i) => `<td${i ? '' : ' style="font-weight:600"'}>${esc(f(c))}</td>`).join('')}</tr>`).join('')}</tbody></table>`;
+  kpiRows = [];
+  const push = (level, key, k) => kpiRows.push({ level, key, ...k });
+
+  // per case
+  const caseRows = [];
+  kpiScope.forEach(s => {
+    const ts = deriveSession(s);
+    const cases = [...new Set(ts.map(t => t.case_id || '(no case)'))].sort();
+    cases.forEach(c => {
+      const sub = ts.filter(t => (t.case_id || '(no case)') === c);
+      const k = transferKpis(kpiBase(sub, o), o), d = descriptive(sub);
+      const name = multi ? `${s.session_id} / ${c}` : c;
+      caseRows.push([name, ...KPI_COLS.map(x => k[x]), d.waiting.toFixed(1), d.failed, d.redundant]);
+      push('case', name, k);
+    });
+  });
+  const tot = transferKpis(base, o), d = descriptive(all);
+  caseRows.push([multi ? 'All listed sessions' : 'Whole session', ...KPI_COLS.map(x => tot[x]), d.waiting.toFixed(1), d.failed, d.redundant]);
+  push('total', 'total', tot);
+  let h = `<div class="section-title">Per case</div>` +
+    tbl(['Case', ...KPI_COLS, 'waiting [min]', 'failed', 'redundant'], caseRows);
+  const bm = groupKpis(base, t => t.medium_l, o); bm.forEach(r => push('medium', r.key, r));
+  h += `<div class="section-title">By transfer medium</div>` + tbl(['Medium', ...KPI_COLS], bm.map(r => [r.key, ...KPI_COLS.map(x => r[x])]));
+  const trg = {}; base.forEach(t => (triggerLabel(t) || '(not set)').split('; ').forEach(v => { (trg[v] = trg[v] || []).push(t); }));
+  const btr = Object.keys(trg).sort().map(k => ({ key: k, ...transferKpis(trg[k], o) })); btr.forEach(r => push('trigger', r.key, r));
+  const bi = groupKpis(base, t => t.initiative || '(not set)', o); bi.forEach(r => push('initiative', r.key, r));
+  h += `<div class="section-title">By initiative of the process step (pull / push)</div>` + tbl(['Initiative', ...KPI_COLS], bi.map(r => [r.key, ...KPI_COLS.map(x => r[x])]));
+  h += `<div class="section-title">By trigger of the process step</div>` +
+    tbl(['Trigger', ...KPI_COLS], btr.map(r => [r.key, ...KPI_COLS.map(x => r[x])]));
+  const bt = groupKpis(base, t => t.info_type, o); bt.forEach(r => push('info_type', r.key, r));
+  h += `<div class="section-title">By type of information</div>` + tbl(['Type of information', ...KPI_COLS], bt.map(r => [r.key, ...KPI_COLS.map(x => r[x])]));
+  const ti = timeIndicators(kpiScope);
+  h += `<div class="section-title">Value-added time (transfer durations)${multi ? ' – all listed sessions' : ''}</div>` +
+    tbl(['Indicator', 'Value'], [
+      ['Value-added time (strict: VA / information-related time)', ti.strict],
+      ['Value-added time (broad: VA + RNVA)', ti.broad],
+      ['Time VA / RNVA / NVA [min]', `${fmtDur(ti.sec.VA)} / ${fmtDur(ti.sec.RNVA)} / ${fmtDur(ti.sec.NVA)}`],
+      ['Transfers without value class / without end', `${ti.noClass} / ${ti.noEnd}`]]);
+  h += `<div class="section-title">Interruptions${multi ? ' (all listed sessions)' : ' of the session'}</div>` +
+    tbl(['Indicator', 'Value'], [
+      ['Transfers interrupted', all.filter(t => t.interrupted === 'Yes').length],
+      ['Interruptions (number / total duration)', `${ti.intr} / ${fmtDur(ti.intrS)} min`],
+      ['Interruptions by source', Object.entries(ti.bySource).map(([k, v]) => `${k}: ${v}`).join(' · ') || '–'],
+      ['Interruptions by origin (number / duration)', Object.entries(ti.byOrigin).sort().map(([k, v]) => `${k}: ${v.n} / ${fmtDur(v.s)} min`).join(' · ') || '–'],
+      ['Interruptions by reason', Object.entries(ti.byReason).map(([k, v]) => `${k}: ${v}`).join(' · ') || '–']]) +
+    `<p class="hint">Information-related time = duration of all transfers with a value class, without interruption time; all recorded transfers count (also failed attempts and transfers with patients).
+      Contacts with several media: ${d.multimedia} · transfers involving patients/relatives: ${all.filter(t => t.involves_patient).length}
+      ${o.includePatients ? '(included)' : '(excluded from KPIs)'}.</p>`;
+  $('kpiBody').innerHTML = h;
+  window.__lastKpi = { total: tot, byMedium: bm, time: ti };   // used by the automated tests
+}
+function kpiCsv() {
+  const cols = ['level', 'key', ...KPI_COLS];
+  download(`KPI_${isoLocal().slice(0, 10)}.csv`, toCSV(cols, kpiRows), 'text/csv');
+}
+/* =========================================================================
+   8. EVENTS AND START-UP
+   ========================================================================= */
+function toast(msg) { const t = document.getElementById('toast'); t.textContent = msg; t.style.display = 'block'; clearTimeout(toast._t); toast._t = setTimeout(() => t.style.display = 'none', 2200); }
+/** In-app confirmation dialog. Returns a Promise<boolean>. */
+function ask(msg) {
+  return new Promise(resolve => {
+    const m = document.getElementById('mdlConfirm');
+    document.getElementById('cfMsg').textContent = msg;
+    m.classList.add('open');
+    const done = val => { m.classList.remove('open'); resolve(val); };
+    document.getElementById('cfYes').onclick = () => done(true);
+    document.getElementById('cfNo').onclick = () => done(false);
+  });
+}
+const $ = id => document.getElementById(id);
+
+$('btnMenu').onclick = () => { closeForm(); show('scrHome'); renderHome(); };
+$('btnNewSession').onclick = newSessionSetup;
+$('inSearch').oninput = renderHome;
+$('btnExportAll').onclick = exportAll;
+$('btnImport').onclick = () => $('inImport').click();
+$('inImport').onchange = e => { if (e.target.files[0]) importBackup(e.target.files[0]); e.target.value = ''; };
+
+$('btnSetupBack').onclick = () => { if (setupFromSession && S) { show('scrObserve'); renderObserve(); } else { show('scrHome'); renderHome(); } };
+$('btnStart').onclick = () => {
+  const ward = $('inWard').value.trim();
+  S = newSession({ ...draftSetup, ward });
+  setupFromSession = false; persist(); setCurrent(S.session_id); show('scrObserve'); renderObserve();
+  if (openSessions().length > 1) toast('Note: other sessions are still open – see menu');
+};
+$('btnResume').onclick = () => {   // save corrections of the session data and go back
+  Object.assign(S, draftSetup, { ward: $('inWard').value.trim() });
+  persist(); setupFromSession = false; show('scrObserve'); renderObserve();
+};
+$('btnBack').onclick = backToSetup;
+$('btnTransfer').onclick = onNewTransfer;
+$('btnInterrupt').onclick = onInterrupt;
+$('btnNewCase').onclick = () => {
+  const id = 'V' + String(S.cases.length + 1).padStart(2, '0');
+  S.cases.push(id); S.currentCase = id; persist(); renderObserve();
+};
+$('btnExport').onclick = () => exportSessions([S], S.session_id);
+$('exShare').onclick = exportShare;
+$('exZip').onclick = exportZip;
+$('exFiles').onclick = exportSeparate;
+$('exClose').onclick = () => { $('mdlExport').classList.remove('open'); exportJob = null; };
+$('btnAwake').onclick = () => { keepAwake = !keepAwake; try { localStorage.setItem(LS_AWAKE, keepAwake ? '1' : ''); } catch (e) {} updateWakeLock(); };
+$('btnKpi').onclick = () => openKpi([S], `KPIs – session ${S.session_id}`);
+$('btnKpiAll').onclick = () => {
+  const q = $('inSearch').value.trim().toLowerCase();
+  const list = Object.values(sessions).filter(s => !q || sessionHaystack(s).includes(q));
+  if (!list.length) { toast('No sessions listed'); return; }
+  openKpi(list, q ? `KPIs – ${list.length} sessions matching "${q}"` : `KPIs – all ${list.length} sessions`);
+};
+['kpiPatients', 'kpiCiDen'].forEach(id => $(id).onchange = renderKpi);
+$('kpiRt').oninput = renderKpi;
+$('kpiClose').onclick = () => $('mdlKpi').classList.remove('open');
+$('kpiCsv').onclick = kpiCsv;
+$('btnEnd').onclick = async () => {
+  if (!(await ask('End the session? The open activity is closed and the data are exported.'))) return;
+  const now = isoLocal(); closeOpenSegment(now); S.end = now; persist();
+  const ended = S;
+  setCurrent(null); show('scrHome'); renderHome();
+  exportSessions([ended], ended.session_id);   // export dialog on top of the menu (share sheet needs a tap)
+};
+$('btnReopen').onclick = async () => {
+  if (!(await ask('Reopen this session for recording? The end time is removed.'))) return;
+  S.end = ''; persist(); setCurrent(S.session_id); renderObserve();
+};
+$('tfSave').onclick = () => saveForm(false);
+document.querySelectorAll('#mdlTransfer [data-shift]').forEach(b => b.onclick = () => {
+  const d = new Date(new Date(editing.timestamp).getTime() + Number(b.dataset.shift) * 1000);
+  setTransferTime(isoLocal(d));
+});
+$('tfTime').onchange = () => { const v = $('tfTime').value; if (v) setTransferTime(withTime(editing.timestamp, v.length === 5 ? v + ':00' : v)); };
+$('tfDone').onclick = () => { editing.end = isoLocal(); editing.end_at_save = ''; renderTimeBar(); };
+$('tfEnd').onchange = () => { const v = $('tfEnd').value; if (!v) return; editing.end = withTime(editing.end || editing.timestamp, v.length === 5 ? v + ':00' : v); editing.end_at_save = ''; renderTimeBar(); };
+$('tfTimeReset').onclick = () => { editing.timestamp = editing.timestamp_recorded || editing.timestamp; editing.time_corrected = ''; editing.running_activity = activityAt(editing.timestamp) || editing.running_activity; renderTimeBar(); };
+$('btnTimeline').onclick = openTimelineEditor;
+$('tfInterrupt').onclick = onInterruptInForm;
+$('btnIntDetails').onclick = () => { const o = openSegment(); if (o) openInterruptionForm(o.segment_id); };
+$('intSave').onclick = () => saveInterruptionForm(false);
+$('intSaveTransfer').onclick = () => saveInterruptionForm(true);
+$('intCancel').onclick = () => { $('mdlInterruption').classList.remove('open'); editingInt = null; };
+$('tlCancel').onclick = () => $('mdlTimeline').classList.remove('open');
+$('tlSave').onclick = saveTimelineEditor;
+$('tfSaveParallel').onclick = () => saveForm(true);
+$('tfSaveNext').onclick = () => saveForm('next');
+$('btnNewSituation').onclick = () => openSituationForm(null, true);
+$('btnCaseDetails').onclick = () => {
+  const ci = (S.caseInfo = S.caseInfo || {})[S.currentCase] || {};
+  $('caseTitle').textContent = `Case ${S.currentCase}`;
+  $('caseDiagnosis').value = ci.diagnosis || ''; $('caseComorb').value = ci.comorbidities || '';
+  $('mdlCase').classList.add('open');
+};
+$('caseSave').onclick = () => {
+  S.caseInfo = S.caseInfo || {};
+  S.caseInfo[S.currentCase] = { diagnosis: $('caseDiagnosis').value.trim(), comorbidities: $('caseComorb').value.trim() };
+  persist(); $('mdlCase').classList.remove('open'); renderObserve(); toast('Case details saved');
+};
+$('caseCancel').onclick = () => $('mdlCase').classList.remove('open');
+$('sitSave').onclick = saveSituationForm;
+$('sitCancel').onclick = () => { $('mdlSituation').classList.remove('open'); editingSit = null; afterSitSave = null; };
+$('sitDelete').onclick = deleteSituation;
+$('tfCancel').onclick = closeForm;
+$('tfDelete').onclick = deleteTransfer;
+
+$('btnSettings').onclick = () => { $('cfgText').value = JSON.stringify(cfg, null, 2); show('scrSettings'); };
+$('btnCfgBack').onclick = () => { if (S) { show('scrObserve'); renderObserve(); } else { show('scrHome'); renderHome(); } };
+$('btnCfgSave').onclick = () => {
+  // iOS "smart punctuation" may turn " into curly quotes, which is invalid JSON
+  const txt = $('cfgText').value.replace(/[\u201C\u201D\u201E\u00AB\u00BB]/g, '"').replace(/[\u2018\u2019]/g, "'");
+  try { cfg = JSON.parse(txt); saveJSON(LS_CFG, cfg); $('cfgText').value = JSON.stringify(cfg, null, 2); toast('Settings saved'); }
+  catch (e) { toast('Invalid JSON: ' + e.message); }
+};
+$('btnCfgReset').onclick = () => { cfg = structuredClone(DEFAULT_CONFIG); saveJSON(LS_CFG, cfg); $('cfgText').value = JSON.stringify(cfg, null, 2); toast('Defaults restored'); };
+$('btnWipe').onclick = async () => {
+  if (!(await ask('Delete ALL local data (all sessions and settings)? Export first!'))) return;
+  try { [LS_SESSIONS, LS_CFG, LS_CURRENT].forEach(k => localStorage.removeItem(k)); } catch (e) {}
+  cfg = structuredClone(DEFAULT_CONFIG); sessions = {}; S = null; show('scrHome'); renderHome(); toast('Local data deleted');
+};
+window.addEventListener('beforeunload', () => { if (S) persist(); });
+// iOS does not fire beforeunload reliably: save also when the app goes to the background or is closed
+window.addEventListener('pagehide', () => { if (S) persist(); });
+document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'hidden') { if (S) persist(); } else { updateWakeLock(); renderExportInfo(); } });
+
+/* =========================================================================
+   9. TABLET / OFFLINE (17 Nov 2026)
+   ========================================================================= */
+const APP_VERSION = 'app 2026-11-17';
+const LS_AWAKE = 'obs_pst_keep_awake';
+let keepAwake = (() => { try { return localStorage.getItem(LS_AWAKE) === '1'; } catch (e) { return false; } })();
+
+/* ---- time fields hh:mm:ss (text fields; the iOS time picker has no seconds) ---- */
+/** "8:15", "08:15:30", "0815", "081530", "8.15.30" → "08:15:00" / "08:15:30"; invalid → null. */
+function parseHms(v) {
+  v = String(v || '').trim().replace(/[.,;\s]/g, ':');
+  let h, m, sec = '0';
+  if (/^\d{1,2}:\d{1,2}(:\d{1,2})?$/.test(v)) [h, m, sec = '0'] = v.split(':');
+  else if (/^\d{3,6}$/.test(v)) { const d = v.length % 2 ? '0' + v : v; [h, m, sec = '0'] = d.match(/\d\d/g); }
+  else return null;
+  h = +h; m = +m; sec = +sec;
+  if (h > 23 || m > 59 || sec > 59) return null;
+  const p = n => String(n).padStart(2, '0');
+  return `${p(h)}:${p(m)}:${p(sec)}`;
+}
+document.addEventListener('focusin', e => { if (e.target.classList && e.target.classList.contains('tfield')) e.target.dataset.prev = e.target.value; });
+// capture phase: runs before the field's own onchange, which then always receives hh:mm:ss
+document.addEventListener('change', e => {
+  const el = e.target; if (!el.classList || !el.classList.contains('tfield')) return;
+  const v = parseHms(el.value);
+  if (!v) { el.value = el.dataset.prev || ''; el.classList.add('bad'); setTimeout(() => el.classList.remove('bad'), 1500); toast('Time as hh:mm:ss, e.g. 08:15:30 or 081530'); e.stopImmediatePropagation(); return; }
+  el.value = v;
+}, true);
+
+/* ---- on-screen keyboard ---- */
+document.addEventListener('keydown', e => {   // "Done" / Enter closes the keyboard (and commits a time field) instead of submitting anything
+  if (e.key === 'Enter' && e.target.tagName === 'INPUT') { e.preventDefault(); e.target.blur(); }
+});
+document.addEventListener('focusin', e => {   // keep the focused field visible above the keyboard in long forms
+  const el = e.target; if (!el.closest || !el.closest('.modal') || !/^(INPUT|TEXTAREA|SELECT)$/.test(el.tagName)) return;
+  setTimeout(() => { try { el.scrollIntoView({ block: 'center', behavior: 'smooth' }); } catch (x) {} }, 350);
+});
+new MutationObserver(() => document.querySelectorAll('input.other-input:not([enterkeyhint]), #intNote:not([enterkeyhint]), #caseDiagnosis:not([enterkeyhint]), #caseComorb:not([enterkeyhint])').forEach(i => {
+  i.setAttribute('enterkeyhint', 'done'); i.setAttribute('autocomplete', 'off');
+})).observe(document.body, { childList: true, subtree: true });
+
+/* ---- screen wake lock: while an interruption runs, a transfer form is open or (optional) during the whole session ---- */
+let wakeLock = null, wakeBusy = false, wakeError = '';
+function wantWake() {
+  return !!S && !S.end && document.visibilityState === 'visible' && (keepAwake || inInterruption() || $('mdlTransfer').classList.contains('open'));
+}
+async function updateWakeLock() {
+  if ('wakeLock' in navigator && !wakeBusy) {
+    wakeBusy = true;
+    try {
+      if (wantWake() && !wakeLock) {
+        wakeLock = await navigator.wakeLock.request('screen'); wakeError = '';
+        wakeLock.addEventListener('release', () => { wakeLock = null; renderStatus(); });
+      } else if (!wantWake() && wakeLock) { const l = wakeLock; wakeLock = null; await l.release(); }
+    } catch (e) { wakeLock = null; wakeError = e.name || 'error'; }
+    wakeBusy = false;
+    if (!!wakeLock !== wantWake() && !wakeError) return updateWakeLock();   // state changed while waiting
+  }
+  renderStatus();
+}
+const isStandalone = () => (window.matchMedia && matchMedia('(display-mode: standalone)').matches) || navigator.standalone === true;
+let swState = '', storagePersisted = null;
+function renderStatus() {
+  const tags = [];
+  if (swState) tags.push(`<span class="tag">${esc(swState)}</span>`);
+  tags.push(`<span class="tag">${isStandalone() ? 'home screen app' : 'browser tab'}</span>`);
+  if (storagePersisted !== null) tags.push(`<span class="tag${storagePersisted ? '' : ' warn'}">storage ${storagePersisted ? 'persistent' : 'not persistent'}</span>`);
+  if (wakeLock) tags.push('<span class="tag open">screen kept awake</span>');
+  else if (wantWake()) tags.push(`<span class="tag warn">screen may lock${'wakeLock' in navigator ? '' : ' (not supported)'} – set Auto-Lock to Never</span>`);
+  $('statusBar').innerHTML = tags.join(' ');
+  const b = $('btnAwake'); if (b) { b.textContent = `Keep screen awake: ${keepAwake ? 'on' : 'off'}`; b.classList.toggle('primary', keepAwake); }
+}
+/** Hint in the menu: data in a Safari tab can be deleted after 7 days without use; the home screen app keeps its own storage. */
+function renderInstallBanner() {
+  const b = $('installBanner'); if (!b) return;
+  const ios = /iPad|iPhone|iPod/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+  const show = ios && !isStandalone();
+  b.classList.toggle('hidden', !show);
+  if (show) b.innerHTML = '<b>Install the app for the observations:</b> Safari → Share → <i>Add to Home Screen</i>, then always start it from the home screen icon. ' +
+    '<span class="hint">In a Safari tab, Safari may delete these data after 7 days without use; the home screen app keeps its own, separate storage (sessions recorded here do not appear there – export / import to move them).</span>';
+}
+/* ---- service worker (offline) and persistent storage; not available when opened as a local file ---- */
+let swWaiting = null;
+if ('serviceWorker' in navigator && /^https?:$/.test(location.protocol)) {
+  navigator.serviceWorker.register('sw.js').then(reg => {
+    const offer = w => { swWaiting = w; $('updateBanner').classList.remove('hidden'); };
+    if (reg.waiting && navigator.serviceWorker.controller) offer(reg.waiting);
+    reg.addEventListener('updatefound', () => {
+      const w = reg.installing;
+      w && w.addEventListener('statechange', () => {
+        if (w.state === 'installed') { if (navigator.serviceWorker.controller) offer(w); else { swState = 'offline ready'; renderStatus(); } }
+      });
+    });
+    navigator.serviceWorker.ready.then(() => { swState = 'offline ready'; renderStatus(); });
+    document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible' && navigator.onLine) reg.update().catch(() => {}); });
+  }).catch(e => { swState = 'offline mode unavailable'; renderStatus(); });
+  let reloading = false;
+  navigator.serviceWorker.addEventListener('controllerchange', () => { if (swWaiting && !reloading) { reloading = true; if (S) persist(); location.reload(); } });
+} else swState = location.protocol === 'file:' ? 'local file (no offline install)' : '';
+$('btnUpdate').onclick = async () => {
+  if (editing) { toast('Close the transfer form first'); return; }
+  if (S && !S.end && !(await ask('A session is open. Update now? The data are kept and the session is restored after the reload.'))) return;
+  if (swWaiting) swWaiting.postMessage('skipWaiting');
+};
+if (navigator.storage && navigator.storage.persisted) {
+  navigator.storage.persisted().then(p => p || (navigator.storage.persist ? navigator.storage.persist() : false))
+    .then(p => { storagePersisted = !!p; renderStatus(); }).catch(() => {});
+}
+
+// start-up: continue the session that was being recorded (e.g. after an accidental reload), otherwise menu
+(function init() {
+  const cur = getCurrent();
+  if (cur && isOpen(sessions[cur])) { openSession(cur); toast('Open session restored'); }
+  else { show('scrHome'); renderHome(); }
+  tick(); setInterval(tick, 1000);
+})();
+</script>
+</body>
+</html>

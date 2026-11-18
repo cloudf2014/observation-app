@@ -1,0 +1,19 @@
+{
+  "name": "Observation Tool – process steps",
+  "short_name": "Observation",
+  "description": "Offline observation form for information transfers in hospital ward processes (master's thesis, TUM fml). Data stay on the device.",
+  "id": "./index_process_steps.html",
+  "start_url": "./index_process_steps.html",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "any",
+  "background_color": "#fafafa",
+  "theme_color": "#ffffff",
+  "lang": "en",
+  "icons": [
+    { "src": "icons/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "icons/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "icons/icon-maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" },
+    { "src": "icons/apple-touch-icon.png", "sizes": "180x180", "type": "image/png" }
+  ]
+}
